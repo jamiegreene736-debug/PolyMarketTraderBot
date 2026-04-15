@@ -51,3 +51,20 @@ async def dashboard(_=Depends(verify_password)):
 @app.get("/api/stats")
 async def api_stats(_=Depends(verify_password)):
     return await db.get_dashboard_stats()
+
+
+@app.get("/api/status")
+async def api_status(_=Depends(verify_password)):
+    return await db.get_bot_status()
+
+
+@app.post("/api/start")
+async def api_start(_=Depends(verify_password)):
+    await db.set_bot_status("running")
+    return {"status": "running"}
+
+
+@app.post("/api/stop")
+async def api_stop(_=Depends(verify_password)):
+    await db.set_bot_status("stopped")
+    return {"status": "stopped"}

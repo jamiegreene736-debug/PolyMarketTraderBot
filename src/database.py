@@ -40,8 +40,58 @@ async def init_db():
                 message   TEXT NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bot_control (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                status         TEXT DEFAULT 'stopped',
+                last_heartbeat TEXT,
+                last_error     TEXT,
+                updated_at     TEXT
+            )
+        """)
+        # Ensure exactly one control row exists
+        await db.execute("""
+            INSERT OR IGNORE INTO bot_control (id, status, updated_at)
+            VALUES (1, 'stopped', ?)
+        """, (datetime.utcnow().isoformat(),))
         await db.commit()
     logger.info("Database initialized")
+
+
+async def get_bot_status() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM bot_control WHERE id = 1") as cur:
+            row = await cur.fetchone()
+            if not row:
+                return {"status": "stopped", "last_heartbeat": None, "last_error": None}
+            data = dict(row)
+
+    # Determine if bot is healthy based on heartbeat age
+    heartbeat = data.get("last_heartbeat")
+    if data["status"] == "running" and heartbeat:
+        from datetime import timezone
+        last = datetime.fromisoformat(heartbeat)
+        age = (datetime.utcnow() - last).total_seconds()
+        if age > 120:  # No heartbeat in 2 minutes = error
+            data["status"] = "error"
+    return data
+
+
+async def set_bot_status(status: str, error: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE bot_control SET status = ?, last_error = ?, updated_at = ? WHERE id = 1
+        """, (status, error, datetime.utcnow().isoformat()))
+        await db.commit()
+
+
+async def update_heartbeat(error: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            UPDATE bot_control SET last_heartbeat = ?, last_error = ? WHERE id = 1
+        """, (datetime.utcnow().isoformat(), error))
+        await db.commit()
 
 
 async def insert_trade(strategy: str, market_slug: str, question: str,

@@ -119,6 +119,18 @@ async def main():
 
     try:
         while True:
+            bot_status = await db.get_bot_status()
+
+            if bot_status["status"] == "stopped":
+                logger.info("Bot is paused (status=stopped). Waiting for start signal...")
+                await asyncio.sleep(5)
+                continue
+
+            if bot_status["status"] == "error":
+                logger.warning("Bot is in error state. Waiting for restart...")
+                await asyncio.sleep(5)
+                continue
+
             # Refresh balance every 10 ticks
             if balance_refresh_counter % 10 == 0:
                 await refresh_balance(client, capital)
@@ -128,7 +140,13 @@ async def main():
                         f"open orders={order_manager.get_total_open_orders()} | "
                         f"capital={capital.summary()} ---")
 
-            await asyncio.gather(*[run_strategy_safely(s) for s in enabled])
+            try:
+                await asyncio.gather(*[run_strategy_safely(s) for s in enabled])
+                await db.update_heartbeat()
+            except Exception as e:
+                logger.error(f"Strategy loop error: {e}")
+                await db.update_heartbeat(error=str(e))
+
             await asyncio.sleep(poll_interval)
 
     except KeyboardInterrupt:
@@ -136,6 +154,7 @@ async def main():
     finally:
         await client.cancel_all_orders()
         await client.close()
+        await db.set_bot_status("stopped")
         logger.info("Bot stopped cleanly.")
 
 

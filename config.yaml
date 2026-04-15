@@ -1,6 +1,6 @@
 bot:
   poll_interval_seconds: 30       # How often each strategy runs
-  dry_run: true                   # Set to false to place real orders
+  dry_run: false                  # Live trading enabled
   max_concurrent_orders: 20       # Max open orders at any time
   log_level: INFO
 

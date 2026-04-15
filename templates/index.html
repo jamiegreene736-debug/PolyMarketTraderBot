@@ -28,17 +28,62 @@
     header h1 { font-size: 18px; font-weight: 600; color: #fff; letter-spacing: -0.3px; }
     header h1 span { color: #6366f1; }
 
-    .live-dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #22c55e;
-      display: inline-block;
-      margin-right: 6px;
-      animation: pulse 2s infinite;
+    /* ── Status Indicator ── */
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 16px;
     }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #1a1f2e;
+      border: 1px solid #1e2433;
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+
+    .status-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.stopped  { background: #475569; }
+    .status-dot.starting { background: #f59e0b; animation: pulse 1s infinite; }
+    .status-dot.running  { background: #22c55e; animation: pulse 2s infinite; }
+    .status-dot.error    { background: #ef4444; animation: pulse 0.8s infinite; }
+
     @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.4; }
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.85); }
     }
+
+    .status-text.stopped  { color: #64748b; }
+    .status-text.starting { color: #f59e0b; }
+    .status-text.running  { color: #22c55e; }
+    .status-text.error    { color: #ef4444; }
+
+    /* ── Control Button ── */
+    .btn-control {
+      padding: 8px 22px;
+      border-radius: 8px;
+      border: none;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      letter-spacing: 0.2px;
+    }
+    .btn-control:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-start   { background: #22c55e; color: #000; }
+    .btn-start:hover:not(:disabled) { background: #16a34a; }
+    .btn-stop    { background: #ef4444; color: #fff; }
+    .btn-stop:hover:not(:disabled)  { background: #dc2626; }
+    .btn-restart { background: #f59e0b; color: #000; }
+    .btn-restart:hover:not(:disabled) { background: #d97706; }
 
     .container { max-width: 1400px; margin: 0 auto; padding: 24px 32px; }
 
@@ -157,10 +202,13 @@
 
 <header>
   <h1><span>Poly</span>Market Trader</h1>
-  <div style="display:flex; align-items:center; gap:16px; color:#64748b; font-size:13px;">
-    <span><span class="live-dot"></span>Live</span>
-    <span>{{ trades_today }} trades today</span>
-    <button onclick="location.reload()" style="background:#1e2433; border:none; color:#94a3b8; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">Refresh</button>
+  <div class="status-bar">
+    <span style="color:#64748b; font-size:13px;">{{ trades_today }} trades today</span>
+    <div class="status-indicator">
+      <div class="status-dot stopped" id="statusDot"></div>
+      <span class="status-text stopped" id="statusText">Checking...</span>
+    </div>
+    <button class="btn-control btn-start" id="controlBtn" onclick="handleControl()">Start</button>
   </div>
 </header>
 
@@ -336,8 +384,74 @@
   const lc = document.getElementById('logContainer');
   if (lc) lc.scrollTop = lc.scrollHeight;
 
-  // Auto-refresh every 30 seconds
-  setTimeout(() => location.reload(), 30000);
+  // ── Bot Start/Stop Control ──────────────────────────────────────────────
+
+  const dot  = document.getElementById('statusDot');
+  const text = document.getElementById('statusText');
+  const btn  = document.getElementById('controlBtn');
+
+  function applyStatus(status) {
+    dot.className  = 'status-dot ' + status;
+    text.className = 'status-text ' + status;
+    btn.disabled   = false;
+
+    if (status === 'running') {
+      text.textContent = 'Running';
+      btn.textContent  = 'Stop';
+      btn.className    = 'btn-control btn-stop';
+    } else if (status === 'stopped') {
+      text.textContent = 'Stopped';
+      btn.textContent  = 'Start';
+      btn.className    = 'btn-control btn-start';
+    } else if (status === 'starting') {
+      text.textContent = 'Starting...';
+      btn.textContent  = 'Starting...';
+      btn.className    = 'btn-control btn-start';
+      btn.disabled     = true;
+    } else if (status === 'error') {
+      text.textContent = 'Error';
+      btn.textContent  = 'Restart';
+      btn.className    = 'btn-control btn-restart';
+    }
+  }
+
+  async function pollStatus() {
+    try {
+      const res  = await fetch('/api/status');
+      const data = await res.json();
+      applyStatus(data.status || 'stopped');
+    } catch (e) {
+      applyStatus('error');
+    }
+  }
+
+  async function handleControl() {
+    const isRunning = btn.classList.contains('btn-stop');
+    const endpoint  = isRunning ? '/api/stop' : '/api/start';
+
+    applyStatus('starting');
+
+    try {
+      await fetch(endpoint, { method: 'POST' });
+      // Poll until status confirms the change
+      let tries = 0;
+      const check = setInterval(async () => {
+        tries++;
+        const res  = await fetch('/api/status');
+        const data = await res.json();
+        if (data.status !== 'starting' || tries > 10) {
+          clearInterval(check);
+          applyStatus(data.status);
+        }
+      }, 1500);
+    } catch (e) {
+      applyStatus('error');
+    }
+  }
+
+  // Poll status every 5 seconds
+  pollStatus();
+  setInterval(pollStatus, 5000);
 </script>
 </body>
 </html>
