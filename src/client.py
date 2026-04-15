@@ -132,38 +132,46 @@ class PolymarketClient:
     # ── Market Data ──────────────────────────────────────────────────────────
 
     async def get_markets(self, **kwargs) -> list:
-        # SDK list() accepts no arguments — fetch all and filter client-side
-        raw = await self._retry(lambda: self._client.markets.list())
+        """
+        Fetch markets from the SDK.
+        The SDK takes parameters as a positional dict, NOT as kwargs.
+        Response is a dict with a 'markets' key, or a Pydantic model.
+        Paginates to fetch up to 500 markets total.
+        """
+        all_markets = []
+        offset = 0
+        limit = 100
 
-        # Diagnose the raw response so we know how to parse it
-        raw_type = type(raw).__name__
-        raw_len = "N/A"
-        try:
-            raw_len = len(raw)
-        except TypeError:
-            pass
-        raw_keys = list(raw.keys()) if isinstance(raw, dict) else []
-        raw_attrs = [a for a in dir(raw) if not a.startswith("_")][:25] if not isinstance(raw, (dict, list)) else []
-        diag = f"SDK.markets.list() → type={raw_type} len={raw_len} keys={raw_keys} attrs={raw_attrs}"
-        logger.info(diag)
-        if isinstance(raw, list) and len(raw) > 0:
-            logger.info(f"  first item: type={type(raw[0]).__name__} {str(raw[0])[:300]}")
-        elif not isinstance(raw, (dict, list)) and raw is not None:
-            logger.info(f"  object str: {str(raw)[:400]}")
-        elif isinstance(raw, dict) and raw:
-            logger.info(f"  dict: {str(raw)[:400]}")
+        while True:
+            params = {"limit": limit, "offset": offset, "active": True, "closed": False}
+            try:
+                raw = await self._retry(lambda: self._client.markets.list(params))
+            except Exception as e:
+                logger.warning(f"markets.list(dict) failed: {e} — trying no args")
+                try:
+                    raw = await self._retry(lambda: self._client.markets.list())
+                except Exception as e2:
+                    logger.error(f"markets.list() also failed: {e2}")
+                    break
 
-        all_markets = self._to_list(raw)
-        logger.info(f"  _to_list → {len(all_markets)} items")
+            page = self._to_list(raw)
+            if not page:
+                break
+            all_markets.extend(page)
+            if len(page) < limit:
+                break  # last page
+            offset += limit
+            if offset >= 500:
+                break
 
-        # Remove closed/inactive markets
+        # Filter out closed/inactive
         markets = [
             m for m in all_markets
             if m.get("active") is not False
             and m.get("closed") is not True
             and m.get("archived") is not True
         ]
-        logger.info(f"get_markets: {len(all_markets)} total, {len(markets)} active")
+        logger.info(f"get_markets: fetched {len(all_markets)} total, {len(markets)} active")
         return markets
 
     async def get_market(self, slug: str) -> dict:

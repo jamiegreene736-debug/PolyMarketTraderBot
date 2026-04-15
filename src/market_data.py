@@ -44,10 +44,19 @@ class MarketData:
                 logger.info(msg)
                 await db.log_to_db("INFO", msg)
 
-                if not self._diagnosed and self._markets_cache:
+                if not self._diagnosed:
                     self._diagnosed = True
-                    sample = self._markets_cache[0]
-                    await db.log_to_db("INFO", f"Active market sample: {str(sample)[:500]}")
+                    if self._markets_cache:
+                        sample = self._markets_cache[0]
+                        await db.log_to_db("INFO", f"Active market sample keys: {list(sample.keys())}")
+                        await db.log_to_db("INFO", f"Active market sample: {str(sample)[:500]}")
+                    elif raw:
+                        # Got markets but all filtered out — show why
+                        sample = raw[0]
+                        await db.log_to_db("INFO", f"ALL FILTERED OUT. Sample keys: {list(sample.keys())}")
+                        await db.log_to_db("INFO", f"Sample active={sample.get('active')} closed={sample.get('closed')} archived={sample.get('archived')} endDate={sample.get('endDate')}")
+                    else:
+                        await db.log_to_db("WARNING", "get_markets returned empty list — check SDK response parsing")
 
             except Exception as e:
                 msg = f"Failed to fetch markets: {e}"
