@@ -31,15 +31,19 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
         order_size       = self.config.get("order_size_usdc", 50)
         min_net_return   = self.config.get("min_net_return_pct", 1.0)
 
-        markets = await self.market_data.get_markets_resolving_soon(
-            max_hours=max_hours, min_volume=min_volume
-        )
+        # If max_hours is large (>720), scan all active markets
+        if max_hours >= 720:
+            markets = await self.market_data.get_markets()
+        else:
+            markets = await self.market_data.get_markets_resolving_soon(
+                max_hours=max_hours, min_volume=min_volume
+            )
 
         if not markets:
-            self.log("No markets resolving soon found")
+            self.log("No active markets found")
             return
 
-        self.log(f"Scanning {len(markets)} markets for near-certain NO opportunities")
+        self.log(f"Scanning {len(markets)} markets for near-certain NO (YES<=${max_yes_price})")
         entered = 0
 
         for market in markets:

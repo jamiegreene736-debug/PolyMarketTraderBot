@@ -41,6 +41,9 @@ class OrderManager:
             )
             order_id = result.get("id")
             if not order_id:
+                msg = f"[order] No order_id returned for {intent} @ ${price:.4f} on {market_slug} — result={result}"
+                logger.warning(msg)
+                await db.log_to_db("WARNING", msg)
                 return None
 
             async with self._lock:
@@ -54,6 +57,10 @@ class OrderManager:
                 }
                 self._market_orders.setdefault(market_slug, []).append(order_id)
 
+            msg = f"[order] PLACED {intent} {quantity:.1f}x @ ${price:.4f} on '{question[:40]}' id={order_id}"
+            logger.info(msg)
+            await db.log_to_db("INFO", msg)
+
             await db.insert_trade(
                 strategy=strategy,
                 market_slug=market_slug,
@@ -66,7 +73,9 @@ class OrderManager:
             return order_id
 
         except Exception as e:
-            logger.error(f"Failed to place order {intent} @ {price} on {market_slug}: {e}")
+            msg = f"[order] FAILED {intent} @ ${price:.4f} on {market_slug}: {e}"
+            logger.error(msg)
+            await db.log_to_db("ERROR", msg)
             return None
 
     async def cancel_order(self, order_id: str) -> bool:

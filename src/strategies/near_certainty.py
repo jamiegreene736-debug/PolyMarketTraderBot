@@ -22,20 +22,24 @@ class NearCertaintyStrategy(BaseStrategy):
             return
 
         min_price        = self.config.get("min_price", 0.93)
-        max_hours        = self.config.get("max_hours_to_resolution", 72)
-        min_volume       = self.config.get("min_market_volume", 1000)
+        max_hours        = self.config.get("max_hours_to_resolution", 8760)   # default 1 year
+        min_volume       = self.config.get("min_market_volume", 0)
         order_size       = self.config.get("order_size_usdc", 50)
-        min_net_return   = self.config.get("min_net_return_pct", 1.0)  # minimum 1% after fees
+        min_net_return   = self.config.get("min_net_return_pct", 1.0)
 
-        markets = await self.market_data.get_markets_resolving_soon(
-            max_hours=max_hours, min_volume=min_volume
-        )
+        # If max_hours is large (>720), scan all active markets instead of resolving-soon
+        if max_hours >= 720:
+            markets = await self.market_data.get_markets()
+        else:
+            markets = await self.market_data.get_markets_resolving_soon(
+                max_hours=max_hours, min_volume=min_volume
+            )
 
         if not markets:
-            self.log("No markets resolving soon found")
+            self.log("No active markets found")
             return
 
-        self.log(f"Scanning {len(markets)} markets resolving within {max_hours}h")
+        self.log(f"Scanning {len(markets)} markets for near-certainty YES (price>=${min_price})")
         entered = 0
 
         for market in markets:
