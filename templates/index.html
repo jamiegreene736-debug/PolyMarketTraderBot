@@ -326,22 +326,12 @@
   <!-- Bot Logs -->
   <div class="panel full-row">
     <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
-      Bot Logs
+      <span>Bot Logs <span id="logAge" style="font-size:11px; color:#475569; font-weight:400; margin-left:8px;"></span></span>
       <button onclick="clearLogs()" style="background:#1e2433; border:1px solid #2d3748; color:#94a3b8; padding:4px 12px; border-radius:6px; cursor:pointer; font-size:11px;">Clear</button>
     </div>
     <div class="panel-body">
       <div class="log-container" id="logContainer">
-        {% if recent_logs %}
-          {% for log in recent_logs %}
-          <div class="log-line log-{{ log.level }}">
-            <span class="log-time">{{ log.timestamp[11:19] }}</span>
-            <span class="log-{{ log.level }}">[{{ log.level }}]</span>
-            {{ log.message }}
-          </div>
-          {% endfor %}
-        {% else %}
-          <div class="log-line log-INFO">Waiting for bot to start...</div>
-        {% endif %}
+        <div class="log-line log-INFO" id="logPlaceholder">Waiting for bot to start...</div>
       </div>
     </div>
   </div>
@@ -456,10 +446,59 @@
   pollStatus();
   setInterval(pollStatus, 5000);
 
+  // ── Live Log Updates ────────────────────────────────────────────────────
+
+  const logContainer  = document.getElementById('logContainer');
+  const logPlaceholder = document.getElementById('logPlaceholder');
+  const logAge        = document.getElementById('logAge');
+  let lastLogCount    = 0;
+
+  function renderLogs(logs) {
+    if (!logs || logs.length === 0) {
+      logContainer.innerHTML = '<div class="log-line log-INFO" id="logPlaceholder">Waiting for bot to start...</div>';
+      lastLogCount = 0;
+      return;
+    }
+
+    if (logs.length === lastLogCount) return; // nothing new
+    lastLogCount = logs.length;
+
+    const wasAtBottom = logContainer.scrollHeight - logContainer.scrollTop <= logContainer.clientHeight + 40;
+
+    logContainer.innerHTML = logs.map(log => `
+      <div class="log-line log-${log.level}">
+        <span class="log-time">${log.timestamp.slice(11,19)}</span>
+        <span class="log-${log.level}">[${log.level}]</span>
+        ${log.message}
+      </div>
+    `).join('');
+
+    if (wasAtBottom) logContainer.scrollTop = logContainer.scrollHeight;
+
+    const newest = logs[logs.length - 1];
+    if (newest) {
+      const age = Math.round((Date.now() - new Date(newest.timestamp + 'Z').getTime()) / 1000);
+      logAge.textContent = age < 5 ? '● live' : `updated ${age}s ago`;
+    }
+  }
+
+  async function refreshLogs() {
+    try {
+      const res  = await fetch('/api/stats');
+      const data = await res.json();
+      renderLogs(data.recent_logs || []);
+    } catch (e) { /* silent fail */ }
+  }
+
   async function clearLogs() {
     await fetch('/api/clear-logs', { method: 'POST' });
-    location.reload();
+    lastLogCount = 0;
+    logContainer.innerHTML = '<div class="log-line log-INFO">Logs cleared.</div>';
   }
+
+  // Poll logs every 3 seconds
+  refreshLogs();
+  setInterval(refreshLogs, 3000);
 </script>
 </body>
 </html>
