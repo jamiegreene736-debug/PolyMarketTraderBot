@@ -8,16 +8,20 @@ Access at your Railway URL (e.g. https://polymarkettraderbot.up.railway.app)
 """
 
 import os
+import json
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import HTMLResponse
-from fastapi.templating import Jinja2Templates
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from jinja2 import Environment, FileSystemLoader
 import secrets
 
 from src import database as db
 
 app = FastAPI(title="PolyMarket Trader Dashboard", docs_url=None, redoc_url=None)
-templates = Jinja2Templates(directory="templates")
+
+jinja_env = Environment(loader=FileSystemLoader("templates"))
+jinja_env.filters["tojson"] = json.dumps
+
 security = HTTPBasic()
 
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "changeme")
@@ -37,9 +41,11 @@ async def startup():
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(request: Request, _=Depends(verify_password)):
+async def dashboard(_=Depends(verify_password)):
     stats = await db.get_dashboard_stats()
-    return templates.TemplateResponse("index.html", {"request": request, **stats})
+    template = jinja_env.get_template("index.html")
+    html = template.render(**stats)
+    return HTMLResponse(content=html)
 
 
 @app.get("/api/stats")
