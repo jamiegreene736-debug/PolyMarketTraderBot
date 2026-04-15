@@ -29,6 +29,7 @@ from src.capital_manager import CapitalManager
 from src import database as db
 
 from src.strategies.near_certainty import NearCertaintyStrategy
+from src.strategies.inverted_near_certainty import InvertedNearCertaintyStrategy
 from src.strategies.market_making import MarketMakingStrategy
 from src.strategies.logical_arb import LogicalArbStrategy
 from src.strategies.cross_platform import CrossPlatformArbStrategy
@@ -83,6 +84,8 @@ async def run_bot_loop():
     strategies = [
         NearCertaintyStrategy("near_certainty", config["strategies"]["near_certainty"],
                               client, market_data, order_manager, capital),
+        InvertedNearCertaintyStrategy("inverted_near_certainty", config["strategies"]["inverted_near_certainty"],
+                                      client, market_data, order_manager, capital),
         MarketMakingStrategy("market_making", config["strategies"]["market_making"],
                              client, market_data, order_manager, capital),
         LogicalArbStrategy("logical_arb", config["strategies"]["logical_arb"],
