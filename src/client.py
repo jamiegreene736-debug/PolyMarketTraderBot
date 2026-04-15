@@ -123,6 +123,20 @@ class PolymarketClient:
     async def get_markets(self, **kwargs) -> list:
         # SDK list() accepts no arguments — fetch all and filter client-side
         raw = await self._retry(lambda: self._client.markets.list())
+
+        # Diagnose the raw response type so we know how to parse it
+        raw_type = type(raw).__name__
+        raw_keys = list(raw.keys()) if isinstance(raw, dict) else []
+        raw_attrs = [a for a in dir(raw) if not a.startswith("_")][:20] if not isinstance(raw, (dict, list)) else []
+        raw_len = len(raw) if isinstance(raw, (list, dict)) else "N/A"
+        logger.info(f"SDK markets.list() raw type={raw_type} len={raw_len} keys={raw_keys} attrs={raw_attrs}")
+        if isinstance(raw, list) and len(raw) > 0:
+            logger.info(f"First item type={type(raw[0]).__name__} preview={str(raw[0])[:300]}")
+        elif isinstance(raw, dict) and raw:
+            logger.info(f"Dict preview={str(raw)[:300]}")
+        elif not isinstance(raw, (dict, list)) and raw is not None:
+            logger.info(f"Object preview={str(raw)[:300]}")
+
         all_markets = self._to_list(raw)
         # Filter to active, non-closed, non-archived markets
         markets = [
@@ -131,7 +145,7 @@ class PolymarketClient:
             and m.get("closed") is not True
             and m.get("archived") is not True
         ]
-        logger.debug(f"get_markets: {len(all_markets)} total, {len(markets)} active")
+        logger.info(f"get_markets: {len(all_markets)} total, {len(markets)} active")
         return markets
 
     async def get_market(self, slug: str) -> dict:
