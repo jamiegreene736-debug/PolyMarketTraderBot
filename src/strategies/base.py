@@ -1,9 +1,11 @@
+import asyncio
 from abc import ABC, abstractmethod
 from loguru import logger
 from src.client import PolymarketClient
 from src.market_data import MarketData
 from src.order_manager import OrderManager
 from src.capital_manager import CapitalManager
+from src import database as db
 
 
 class BaseStrategy(ABC):
@@ -25,4 +27,9 @@ class BaseStrategy(ABC):
         pass
 
     def log(self, msg: str, level: str = "info"):
-        getattr(logger, level)(f"[{self.name}] {msg}")
+        full_msg = f"[{self.name}] {msg}"
+        getattr(logger, level)(full_msg)
+        try:
+            asyncio.create_task(db.log_to_db(level.upper(), full_msg))
+        except RuntimeError:
+            pass
