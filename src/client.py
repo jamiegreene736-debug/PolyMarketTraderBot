@@ -121,15 +121,17 @@ class PolymarketClient:
     # ── Market Data ──────────────────────────────────────────────────────────
 
     async def get_markets(self, **kwargs) -> list:
-        # Default params: only active/open markets, high limit
-        params = {"limit": 500, "active": True, "closed": False, **kwargs}
-        try:
-            raw = await self._retry(lambda: self._client.markets.list(**params))
-        except Exception:
-            # Some SDK versions don't accept keyword filters — fall back to no filter
-            raw = await self._retry(lambda: self._client.markets.list(limit=500))
-        markets = self._to_list(raw)
-        logger.debug(f"get_markets: returned {len(markets)} markets")
+        # SDK list() accepts no arguments — fetch all and filter client-side
+        raw = await self._retry(lambda: self._client.markets.list())
+        all_markets = self._to_list(raw)
+        # Filter to active, non-closed, non-archived markets
+        markets = [
+            m for m in all_markets
+            if m.get("active") is not False
+            and m.get("closed") is not True
+            and m.get("archived") is not True
+        ]
+        logger.debug(f"get_markets: {len(all_markets)} total, {len(markets)} active")
         return markets
 
     async def get_market(self, slug: str) -> dict:
