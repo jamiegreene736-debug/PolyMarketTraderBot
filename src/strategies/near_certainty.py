@@ -1,26 +1,31 @@
-from loguru import logger
 from src.strategies.base import BaseStrategy
+from src import fees
 
 
 class NearCertaintyStrategy(BaseStrategy):
     """
     Near-Certainty Bond Strategy
     ----------------------------
-    Finds markets resolving within X hours where YES is priced >= min_price
-    (e.g. $0.93). Buys and holds to $1.00 at resolution.
+    Buys YES contracts priced >= min_price on markets resolving within
+    max_hours. Holds to $1.00 at resolution.
 
-    Example: Buy YES at $0.95 on a market resolving in 12 hours.
-             Return = (1.00 - 0.95) / 0.95 = 5.3% in 12 hours.
+    Fee-aware: taker fees are calculated and deducted from expected profit.
+    Only enters when net profit after fees exceeds min_net_return_pct.
+
+    Example at p=$0.94, resolves in 24h:
+      Taker fee  = 0.05 × 0.94 × 0.06 = $0.00282/share
+      Net profit = 1.00 - 0.94 - 0.00282 = $0.0572/share (6.1%)
     """
 
     async def run(self):
         if not self.enabled:
             return
 
-        min_price = self.config.get("min_price", 0.93)
-        max_hours = self.config.get("max_hours_to_resolution", 48)
-        min_volume = self.config.get("min_market_volume", 1000)
-        order_size = self.config.get("order_size_usdc", 50)
+        min_price        = self.config.get("min_price", 0.93)
+        max_hours        = self.config.get("max_hours_to_resolution", 72)
+        min_volume       = self.config.get("min_market_volume", 1000)
+        order_size       = self.config.get("order_size_usdc", 50)
+        min_net_return   = self.config.get("min_net_return_pct", 1.0)  # minimum 1% after fees
 
         markets = await self.market_data.get_markets_resolving_soon(
             max_hours=max_hours, min_volume=min_volume
@@ -31,9 +36,10 @@ class NearCertaintyStrategy(BaseStrategy):
             return
 
         self.log(f"Scanning {len(markets)} markets resolving within {max_hours}h")
+        entered = 0
 
         for market in markets:
-            slug = self.market_data.get_slug(market)
+            slug     = self.market_data.get_slug(market)
             question = self.market_data.get_question(market)
 
             if not slug:
@@ -49,34 +55,36 @@ class NearCertaintyStrategy(BaseStrategy):
             except (TypeError, ValueError):
                 continue
 
-            # We want to BUY YES at a price >= min_price
-            # If best_ask <= 1.0 and best_bid >= min_price, opportunity exists
             if best_bid < min_price:
                 continue
 
-            expected_return = round((1.0 - best_ask) / best_ask * 100, 2)
-            hours_left = self.market_data._hours_to_resolution(market)
-
-            self.log(
-                f"Opportunity: {question[:60]} | "
-                f"bid=${best_bid} ask=${best_ask} | "
-                f"return={expected_return}% | {hours_left:.1f}h left"
-            )
-
-            if not self.capital_manager.can_allocate(self.name, order_size):
-                self.log("Capital limit reached, skipping", level="warning")
-                break
-
-            # Skip if we already have an open order on this market
-            if self.order_manager.get_market_order_count(slug) > 0:
-                self.log(f"Already have open order on {slug}, skipping")
+            # Fee-aware profitability check
+            net_profit_pct = fees.net_profit_pct_near_certainty(best_ask)
+            if net_profit_pct < min_net_return:
+                self.log(f"Skipping {slug}: net return {net_profit_pct:.2f}% < {min_net_return}% minimum")
                 continue
 
-            allocated = self.capital_manager.allocate(self.name, order_size)
-            if not allocated:
+            hours_left = self.market_data._hours_to_resolution(market)
+            fee_cost   = fees.taker_fee_per_share(best_ask)
+
+            self.log(
+                f"Opportunity: {question[:55]} | "
+                f"ask=${best_ask:.4f} fee=${fee_cost:.4f} | "
+                f"net={net_profit_pct:.2f}% | {hours_left:.1f}h left"
+            )
+
+            if self.order_manager.get_market_order_count(slug) > 0:
+                continue
+
+            if not self.capital_manager.can_allocate(self.name, order_size):
+                self.log("Capital limit reached", level="warning")
                 break
 
             shares = round(order_size / best_ask, 2)
+
+            if not self.capital_manager.allocate(self.name, order_size):
+                break
+
             order_id = await self.order_manager.place_order(
                 market_slug=slug,
                 question=question,
@@ -88,8 +96,13 @@ class NearCertaintyStrategy(BaseStrategy):
 
             if order_id:
                 self.log(
-                    f"Placed BUY {shares} shares @ ${best_ask} on '{question[:50]}' "
-                    f"(expected +{expected_return}%)"
+                    f"BUY {shares:.1f} shares @ ${best_ask:.4f} | "
+                    f"effective cost ${fees.effective_taker_cost_per_share(best_ask):.4f}/share | "
+                    f"net return {net_profit_pct:.2f}% | '{question[:45]}'"
                 )
+                entered += 1
             else:
                 self.capital_manager.release(self.name, order_size)
+
+        if entered:
+            self.log(f"Entered {entered} near-certainty position(s) this tick")

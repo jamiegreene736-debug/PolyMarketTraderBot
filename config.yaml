@@ -1,50 +1,48 @@
 bot:
-  poll_interval_seconds: 30       # How often each strategy runs
-  dry_run: false                  # Live trading enabled
-  max_concurrent_orders: 20       # Max open orders at any time
+  poll_interval_seconds: 30
+  dry_run: false
+  max_concurrent_orders: 40
   log_level: INFO
 
 capital:
-  reserve_pct: 10                 # Keep 10% of balance as reserve (never trade it)
+  reserve_pct: 10
 
 strategies:
 
   near_certainty:
     enabled: true
-    capital_pct: 30               # Use 30% of available capital
-    min_price: 0.93               # Only buy YES contracts priced above $0.93
-    max_hours_to_resolution: 48   # Only enter markets resolving within 48 hours
-    min_market_volume: 1000       # Minimum market liquidity ($USDC)
-    order_size_usdc: 50           # USDC per trade
+    capital_pct: 30
+    min_price: 0.93               # Buy YES contracts priced above $0.93
+    max_hours_to_resolution: 72   # Increased from 48h — more opportunities
+    min_market_volume: 1000
+    order_size_usdc: 50
+    min_net_return_pct: 1.0       # Minimum 1% profit after taker fees
 
   market_making:
     enabled: true
-    capital_pct: 40               # Use 40% of available capital
-    min_daily_volume: 10000       # Only make markets with $10K+ daily volume
-    spread_pct: 0.03              # Place orders 3 cents away from mid (each side)
-    max_open_orders_per_market: 4 # 2 bids + 2 asks per market
-    order_size_usdc: 100          # USDC per order
-    num_markets: 5                # Number of markets to make simultaneously
-    refresh_interval_seconds: 60  # How often to cancel and replace stale orders
+    capital_pct: 40
+    min_daily_volume: 10000
+    spread_pct: 0.02              # 2-cent spread (rebates make this very profitable)
+    max_open_orders_per_market: 4
+    order_size_usdc: 100
+    num_markets: 20               # Increased from 5 — more rebate volume
+    refresh_interval_seconds: 60
 
   logical_arb:
     enabled: true
-    capital_pct: 20               # Use 20% of available capital
-    min_arb_pct: 0.03             # Only enter when mispricing is > 3%
-    order_size_usdc: 100          # USDC per leg of the arb
-    min_outcomes: 2               # Minimum outcomes in a group to check
+    capital_pct: 20
+    min_arb_pct: 0.03             # 3% minimum profit after taker fees
+    order_size_usdc: 100
+    min_outcomes: 2
 
   cross_platform_arb:
-    enabled: false                # Requires Kalshi API setup
-    capital_pct: 0
-    min_arb_pct: 0.03
+    enabled: false                # Set to true after adding KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY
+    capital_pct: 10
+    min_arb_pct: 0.02             # 2% minimum profit after both platforms' fees
     order_size_usdc: 100
 
   news_catalyst:
-    enabled: false                # Requires news feed API setup
-    capital_pct: 10
+    enabled: false
+    capital_pct: 0
     reaction_window_seconds: 10
     order_size_usdc: 100
-    news_sources:
-      - reuters
-      - ap

@@ -8,7 +8,9 @@
       "WebFetch(domain:newyorkcityservers.com)",
       "WebFetch(domain:dev.to)",
       "WebFetch(domain:agentbets.ai)",
-      "WebFetch(domain:docs.polymarket.us)"
+      "WebFetch(domain:docs.polymarket.us)",
+      "WebFetch(domain:www.polymarketexchange.com)",
+      "WebFetch(domain:pm.wiki)"
     ]
   }
 }

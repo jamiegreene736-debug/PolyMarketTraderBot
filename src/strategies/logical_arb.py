@@ -1,5 +1,6 @@
 from loguru import logger
 from src.strategies.base import BaseStrategy
+from src import fees
 
 
 class LogicalArbStrategy(BaseStrategy):
@@ -64,9 +65,16 @@ class LogicalArbStrategy(BaseStrategy):
                 continue
 
             total_cost = sum(ask_prices)
-            profit_pct = round((1.0 - total_cost) * 100, 2)
 
-            if total_cost >= (1.0 - min_arb):
+            # Account for taker fees on every leg
+            total_fees = sum(
+                fees.taker_fee(round(order_size / max(p, 0.01), 2), p)
+                for p in ask_prices
+            )
+            net_profit = 1.0 - total_cost - (total_fees / order_size if order_size > 0 else 0)
+            profit_pct = round(net_profit * 100, 2)
+
+            if net_profit <= min_arb:
                 continue
 
             self.log(
