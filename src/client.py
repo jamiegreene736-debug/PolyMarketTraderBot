@@ -48,21 +48,32 @@ class PolymarketClient:
     def _to_list(self, obj) -> list:
         """
         Extract a list of dicts from any SDK markets response.
-        Handles: plain list, dict with 'markets'/'data' key, Pydantic model.
+        Handles: plain list, dict with any common key, Pydantic model, iterable.
         """
         if obj is None:
             return []
         if isinstance(obj, list):
             return [self._to_dict(m) for m in obj]
         if isinstance(obj, dict):
-            for key in ("markets", "data", "results", "items"):
+            for key in ("markets", "data", "results", "items", "content"):
                 if key in obj and isinstance(obj[key], list):
                     return [self._to_dict(m) for m in obj[key]]
             return []
-        if hasattr(obj, "markets"):
-            return [self._to_dict(m) for m in obj.markets]
-        if hasattr(obj, "data"):
-            return [self._to_dict(m) for m in obj.data]
+        # Pydantic model or object — check common attribute names first
+        for attr in ("markets", "data", "results", "items", "content"):
+            val = getattr(obj, attr, None)
+            if val is not None and not callable(val):
+                try:
+                    return [self._to_dict(m) for m in val]
+                except TypeError:
+                    pass
+        # Last resort: try plain iteration (handles list-like models)
+        try:
+            items = list(obj)
+            if items:
+                return [self._to_dict(m) for m in items]
+        except TypeError:
+            pass
         return []
 
     def _parse_bbo(self, raw) -> dict:
@@ -124,21 +135,28 @@ class PolymarketClient:
         # SDK list() accepts no arguments — fetch all and filter client-side
         raw = await self._retry(lambda: self._client.markets.list())
 
-        # Diagnose the raw response type so we know how to parse it
+        # Diagnose the raw response so we know how to parse it
         raw_type = type(raw).__name__
+        raw_len = "N/A"
+        try:
+            raw_len = len(raw)
+        except TypeError:
+            pass
         raw_keys = list(raw.keys()) if isinstance(raw, dict) else []
-        raw_attrs = [a for a in dir(raw) if not a.startswith("_")][:20] if not isinstance(raw, (dict, list)) else []
-        raw_len = len(raw) if isinstance(raw, (list, dict)) else "N/A"
-        logger.info(f"SDK markets.list() raw type={raw_type} len={raw_len} keys={raw_keys} attrs={raw_attrs}")
+        raw_attrs = [a for a in dir(raw) if not a.startswith("_")][:25] if not isinstance(raw, (dict, list)) else []
+        diag = f"SDK.markets.list() → type={raw_type} len={raw_len} keys={raw_keys} attrs={raw_attrs}"
+        logger.info(diag)
         if isinstance(raw, list) and len(raw) > 0:
-            logger.info(f"First item type={type(raw[0]).__name__} preview={str(raw[0])[:300]}")
-        elif isinstance(raw, dict) and raw:
-            logger.info(f"Dict preview={str(raw)[:300]}")
+            logger.info(f"  first item: type={type(raw[0]).__name__} {str(raw[0])[:300]}")
         elif not isinstance(raw, (dict, list)) and raw is not None:
-            logger.info(f"Object preview={str(raw)[:300]}")
+            logger.info(f"  object str: {str(raw)[:400]}")
+        elif isinstance(raw, dict) and raw:
+            logger.info(f"  dict: {str(raw)[:400]}")
 
         all_markets = self._to_list(raw)
-        # Filter to active, non-closed, non-archived markets
+        logger.info(f"  _to_list → {len(all_markets)} items")
+
+        # Remove closed/inactive markets
         markets = [
             m for m in all_markets
             if m.get("active") is not False
