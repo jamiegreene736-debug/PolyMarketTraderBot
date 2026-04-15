@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:docs.polymarket.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.quantvps.com)",
+      "WebFetch(domain:newyorkcityservers.com)"
+    ]
+  }
+}
