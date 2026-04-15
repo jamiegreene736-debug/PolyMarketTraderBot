@@ -21,7 +21,7 @@ strategies:
   market_making:
     enabled: true
     capital_pct: 40
-    min_daily_volume: 10000
+    min_daily_volume: 1000
     spread_pct: 0.02              # 2-cent spread (rebates make this very profitable)
     max_open_orders_per_market: 4
     order_size_usdc: 100
