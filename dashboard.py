@@ -97,7 +97,9 @@ async def run_bot_loop():
     poll_interval = bot_cfg.get("poll_interval_seconds", 30)
     balance_refresh_counter = 0
 
-    logger.info(f"Bot started — strategies: {[s.name for s in enabled]}")
+    msg = f"Bot started — active strategies: {[s.name for s in enabled]}"
+    logger.info(msg)
+    await db.log_to_db("INFO", msg)
 
     try:
         while _bot_state["status"] == "running":
@@ -112,30 +114,41 @@ async def run_bot_loop():
                                 balance = float(val)
                                 capital.update_balance(balance)
                                 await db.snapshot_balance(balance, 0.0, 0.0)
-                                logger.info(f"Balance: ${balance:.2f} USDC")
+                                msg = f"Balance refreshed: ${balance:.2f} USDC"
+                                logger.info(msg)
+                                await db.log_to_db("INFO", msg)
                                 break
                     except Exception as e:
-                        logger.warning(f"Balance refresh failed: {e}")
+                        msg = f"Balance refresh failed: {e}"
+                        logger.warning(msg)
+                        await db.log_to_db("WARNING", msg)
 
                 balance_refresh_counter += 1
 
-                logger.info(
-                    f"Tick | open_orders={order_manager.get_total_open_orders()} | "
-                    f"capital={capital.summary()}"
+                tick_msg = (
+                    f"Tick #{balance_refresh_counter} | "
+                    f"open_orders={order_manager.get_total_open_orders()} | "
+                    f"strategies={[s.name for s in enabled]}"
                 )
+                logger.info(tick_msg)
+                await db.log_to_db("INFO", tick_msg)
 
                 for s in enabled:
                     try:
                         await s.run()
                     except Exception as e:
-                        logger.error(f"[{s.name}] crashed: {e}")
+                        msg = f"[{s.name}] crashed: {e}"
+                        logger.error(msg)
+                        await db.log_to_db("ERROR", msg)
 
                 _bot_state["last_heartbeat"] = datetime.utcnow().isoformat()
                 _bot_state["last_error"] = None
 
             except Exception as e:
                 _bot_state["last_error"] = str(e)
-                logger.error(f"Bot loop error: {e}")
+                msg = f"Bot loop error: {e}"
+                logger.error(msg)
+                await db.log_to_db("ERROR", msg)
 
             await asyncio.sleep(poll_interval)
 
@@ -231,3 +244,11 @@ async def api_stop(_=Depends(verify_password)):
         task.cancel()
     logger.info("Bot stopped via dashboard")
     return {"status": "stopped"}
+
+
+@app.post("/api/clear-logs")
+async def api_clear_logs(_=Depends(verify_password)):
+    async with __import__('aiosqlite').connect('bot_data.db') as conn:
+        await conn.execute("DELETE FROM bot_logs")
+        await conn.commit()
+    return {"ok": True}

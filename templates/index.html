@@ -325,7 +325,10 @@
 
   <!-- Bot Logs -->
   <div class="panel full-row">
-    <div class="panel-header">Bot Logs</div>
+    <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+      Bot Logs
+      <button onclick="clearLogs()" style="background:#1e2433; border:1px solid #2d3748; color:#94a3b8; padding:4px 12px; border-radius:6px; cursor:pointer; font-size:11px;">Clear</button>
+    </div>
     <div class="panel-body">
       <div class="log-container" id="logContainer">
         {% if recent_logs %}
@@ -452,6 +455,11 @@
   // Poll status every 5 seconds
   pollStatus();
   setInterval(pollStatus, 5000);
+
+  async function clearLogs() {
+    await fetch('/api/clear-logs', { method: 'POST' });
+    location.reload();
+  }
 </script>
 </body>
 </html>
