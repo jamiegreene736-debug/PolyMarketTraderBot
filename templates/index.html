@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>PolyMarket Trader</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0f14;
+      color: #e2e8f0;
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #151820;
+      border-bottom: 1px solid #1e2433;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    header h1 { font-size: 18px; font-weight: 600; color: #fff; letter-spacing: -0.3px; }
+    header h1 span { color: #6366f1; }
+
+    .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #22c55e;
+      display: inline-block;
+      margin-right: 6px;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .container { max-width: 1400px; margin: 0 auto; padding: 24px 32px; }
+
+    /* ── Stats Cards ── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    .stat-card {
+      background: #151820;
+      border: 1px solid #1e2433;
+      border-radius: 12px;
+      padding: 20px;
+    }
+
+    .stat-card .label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
+    .stat-card .value { font-size: 28px; font-weight: 700; color: #fff; line-height: 1; }
+    .stat-card .value.positive { color: #22c55e; }
+    .stat-card .value.negative { color: #ef4444; }
+    .stat-card .sub { font-size: 12px; color: #64748b; margin-top: 6px; }
+
+    /* ── Panels ── */
+    .panels {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+
+    @media (max-width: 900px) {
+      .panels { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: #151820;
+      border: 1px solid #1e2433;
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 16px 20px;
+      border-bottom: 1px solid #1e2433;
+      font-size: 13px;
+      font-weight: 600;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+
+    .panel-body { padding: 20px; }
+
+    /* ── Table ── */
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { color: #64748b; font-weight: 500; text-align: left; padding: 8px 12px; border-bottom: 1px solid #1e2433; font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; }
+    td { padding: 10px 12px; border-bottom: 1px solid #111520; color: #cbd5e1; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1a1f2e; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .badge-open     { background: #1e3a5f; color: #60a5fa; }
+    .badge-closed   { background: #14532d; color: #4ade80; }
+    .badge-cancelled{ background: #292524; color: #78716c; }
+
+    .pnl-pos { color: #22c55e; font-weight: 600; }
+    .pnl-neg { color: #ef4444; font-weight: 600; }
+
+    /* ── Strategy Stats ── */
+    .strategy-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 0;
+      border-bottom: 1px solid #1e2433;
+    }
+    .strategy-row:last-child { border-bottom: none; }
+    .strategy-name { font-weight: 500; color: #e2e8f0; }
+    .strategy-meta { font-size: 12px; color: #64748b; margin-top: 2px; }
+    .strategy-pnl { font-size: 16px; font-weight: 700; }
+
+    /* ── Logs ── */
+    .log-container {
+      background: #0d0f14;
+      border-radius: 8px;
+      padding: 12px;
+      height: 220px;
+      overflow-y: auto;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 11px;
+    }
+
+    .log-line { padding: 2px 0; line-height: 1.6; }
+    .log-INFO    { color: #94a3b8; }
+    .log-WARNING { color: #fbbf24; }
+    .log-ERROR   { color: #f87171; }
+    .log-time    { color: #475569; margin-right: 8px; }
+
+    /* ── Chart ── */
+    .chart-container { position: relative; height: 200px; }
+
+    /* ── Full width row ── */
+    .full-row { margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1><span>Poly</span>Market Trader</h1>
+  <div style="display:flex; align-items:center; gap:16px; color:#64748b; font-size:13px;">
+    <span><span class="live-dot"></span>Live</span>
+    <span>{{ trades_today }} trades today</span>
+    <button onclick="location.reload()" style="background:#1e2433; border:none; color:#94a3b8; padding:6px 14px; border-radius:6px; cursor:pointer; font-size:12px;">Refresh</button>
+  </div>
+</header>
+
+<div class="container">
+
+  <!-- Stats Cards -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="label">Total P&amp;L</div>
+      <div class="value {% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">
+        {% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}
+      </div>
+      <div class="sub">Realized</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Win Rate</div>
+      <div class="value {% if win_rate >= 50 %}positive{% else %}negative{% endif %}">{{ win_rate }}%</div>
+      <div class="sub">{{ wins }} / {{ total_closed }} trades</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Open Positions</div>
+      <div class="value">{{ open_positions }}</div>
+      <div class="sub">Active orders</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Total Trades</div>
+      <div class="value">{{ total_trades }}</div>
+      <div class="sub">All time</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Trades Today</div>
+      <div class="value">{{ trades_today }}</div>
+      <div class="sub">UTC day</div>
+    </div>
+  </div>
+
+  <!-- P&L Chart + Strategy Breakdown -->
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-header">P&amp;L Over Time</div>
+      <div class="panel-body">
+        <div class="chart-container">
+          <canvas id="pnlChart"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-header">Strategy Breakdown</div>
+      <div class="panel-body">
+        {% if strategy_stats %}
+          {% for s in strategy_stats %}
+          <div class="strategy-row">
+            <div>
+              <div class="strategy-name">{{ s.strategy.replace("_", " ").title() }}</div>
+              <div class="strategy-meta">{{ s.wins }}/{{ s.total }} wins</div>
+            </div>
+            <div class="strategy-pnl {% if s.pnl >= 0 %}pnl-pos{% else %}pnl-neg{% endif %}">
+              {% if s.pnl >= 0 %}+{% endif %}${{ "%.2f"|format(s.pnl) }}
+            </div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p style="color:#475569; text-align:center; padding:40px 0;">No closed trades yet</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Trades -->
+  <div class="panel full-row">
+    <div class="panel-header">Recent Trades</div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Strategy</th>
+            <th>Market</th>
+            <th>Side</th>
+            <th>Price</th>
+            <th>Qty</th>
+            <th>Status</th>
+            <th>P&amp;L</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if recent_trades %}
+            {% for t in recent_trades %}
+            <tr>
+              <td style="white-space:nowrap; color:#64748b;">{{ t.timestamp[:19].replace("T"," ") }}</td>
+              <td>{{ t.strategy.replace("_"," ").title() }}</td>
+              <td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="{{ t.question }}">{{ t.question or t.market_slug }}</td>
+              <td>
+                <span style="color:{% if 'BUY' in t.side %}#60a5fa{% else %}#f87171{% endif %}">
+                  {{ t.side.replace("ORDER_INTENT_","").replace("_"," ") }}
+                </span>
+              </td>
+              <td>${{ "%.4f"|format(t.price) }}</td>
+              <td>{{ t.quantity }}</td>
+              <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
+              <td class="{% if t.pnl > 0 %}pnl-pos{% elif t.pnl < 0 %}pnl-neg{% endif %}">
+                {% if t.pnl != 0 %}{% if t.pnl > 0 %}+{% endif %}${{ "%.2f"|format(t.pnl) }}{% else %}—{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          {% else %}
+            <tr><td colspan="8" style="text-align:center; color:#475569; padding:40px;">No trades yet. Bot is running in dry_run mode until you flip the switch in config.yaml.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Bot Logs -->
+  <div class="panel full-row">
+    <div class="panel-header">Bot Logs</div>
+    <div class="panel-body">
+      <div class="log-container" id="logContainer">
+        {% if recent_logs %}
+          {% for log in recent_logs %}
+          <div class="log-line log-{{ log.level }}">
+            <span class="log-time">{{ log.timestamp[11:19] }}</span>
+            <span class="log-{{ log.level }}">[{{ log.level }}]</span>
+            {{ log.message }}
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="log-line log-INFO">Waiting for bot to start...</div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // P&L Chart
+  const balanceHistory = {{ balance_history | tojson }};
+  const labels = balanceHistory.map(b => b.timestamp.slice(11, 19));
+  const pnlData = balanceHistory.map(b => b.realized_pnl);
+
+  new Chart(document.getElementById('pnlChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Realized P&L',
+        data: pnlData,
+        borderColor: '#6366f1',
+        backgroundColor: 'rgba(99,102,241,0.1)',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: true,
+        tension: 0.4,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#475569', maxTicksLimit: 8 }, grid: { color: '#1e2433' } },
+        y: {
+          ticks: { color: '#475569', callback: v => '$' + v.toFixed(2) },
+          grid: { color: '#1e2433' }
+        }
+      }
+    }
+  });
+
+  // Auto-scroll logs to bottom
+  const lc = document.getElementById('logContainer');
+  if (lc) lc.scrollTop = lc.scrollHeight;
+
+  // Auto-refresh every 30 seconds
+  setTimeout(() => location.reload(), 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+polymarket-us
+fastapi
+uvicorn[standard]
+jinja2
+aiosqlite
+pyyaml
+python-dotenv
+loguru
+httpx
+aiohttp
