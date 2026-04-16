@@ -227,12 +227,47 @@ async def run_bot_loop():
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
+async def _auto_restart_bot():
+    """
+    Supervisor loop: starts the bot immediately on server boot, and
+    automatically restarts it if it crashes — with a 10-second cooldown
+    between attempts so we don't spin-loop on a bad config.
+    """
+    while True:
+        logger.info("Auto-starting bot loop...")
+        _bot_state["status"] = "running"
+        _bot_state["last_error"] = None
+        task = asyncio.create_task(run_bot_loop())
+        _bot_state["task"] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            logger.info("Bot task cancelled (shutdown)")
+            break
+        except Exception as e:
+            logger.error(f"Bot loop crashed unexpectedly: {e}")
+            _bot_state["last_error"] = str(e)
+        # If we get here the bot stopped (crash or clean stop via /api/stop)
+        if _bot_state.get("status") == "stopped":
+            # User explicitly stopped it — don't restart, just wait
+            logger.info("Bot stopped by user — supervisor idle, waiting for manual start")
+            while _bot_state.get("status") == "stopped":
+                await asyncio.sleep(5)
+        else:
+            logger.warning("Bot crashed — restarting in 10s...")
+            _bot_state["status"] = "error"
+            await asyncio.sleep(10)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logger()
     await db.init_db()
+    supervisor = asyncio.create_task(_auto_restart_bot())
+    _bot_state["supervisor"] = supervisor
     yield
-    # Cancel bot task on shutdown
+    # Shutdown: cancel supervisor and bot task cleanly
+    supervisor.cancel()
     task = _bot_state.get("task")
     if task and not task.done():
         task.cancel()
@@ -288,19 +323,20 @@ async def api_status(_=Depends(verify_password)):
 
 @app.post("/api/start")
 async def api_start(_=Depends(verify_password)):
-    task = _bot_state.get("task")
-    if task and not task.done():
-        return {"status": _bot_state["status"]}
-
+    if _bot_state.get("status") == "running":
+        task = _bot_state.get("task")
+        if task and not task.done():
+            return {"status": "running"}
+    # Signal supervisor to resume (it polls for status != "stopped")
     _bot_state["status"] = "running"
     _bot_state["last_error"] = None
-    _bot_state["task"] = asyncio.create_task(run_bot_loop())
-    logger.info("Bot started via dashboard")
+    logger.info("Bot start requested via dashboard")
     return {"status": "running"}
 
 
 @app.post("/api/stop")
 async def api_stop(_=Depends(verify_password)):
+    # Set stopped BEFORE cancelling so supervisor doesn't auto-restart
     _bot_state["status"] = "stopped"
     task = _bot_state.get("task")
     if task and not task.done():
