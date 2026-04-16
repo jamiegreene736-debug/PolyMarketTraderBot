@@ -44,6 +44,18 @@ strategies:
     order_size_usdc: 100
     min_outcomes: 2
 
+  ai_trader:
+    enabled: true
+    capital_pct: 20                  # 20% of portfolio for AI trades
+    order_size_usdc: 50
+    min_edge_pct: 0.12               # Need ≥12% gap between AI estimate and market price
+    min_market_price: 0.10           # Skip markets priced below 10% (near-certain NO)
+    max_market_price: 0.90           # Skip markets priced above 90% (near-certain YES)
+    max_markets_per_run: 8           # Analyse max 8 markets per hour (API cost control)
+    run_interval_seconds: 3600       # Run every 60 minutes
+    cache_ttl_seconds: 7200          # Cache AI estimates for 2 hours
+    model: claude-haiku-4-5-20251001 # Fast + cheap for high-frequency analysis
+
   cross_platform_arb:
     enabled: false                   # Disabled — Kalshi approval pending
     capital_pct: 0

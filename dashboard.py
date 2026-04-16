@@ -34,6 +34,8 @@ from src.strategies.market_making import MarketMakingStrategy
 from src.strategies.logical_arb import LogicalArbStrategy
 from src.strategies.cross_platform import CrossPlatformArbStrategy
 from src.strategies.news_catalyst import NewsCatalystStrategy
+from src.strategies.ai_trader import AITradingStrategy
+from src.news_client import NewsClient
 
 load_dotenv()
 
@@ -81,6 +83,8 @@ async def run_bot_loop():
         reserve_pct=config.get("capital", {}).get("reserve_pct", 10),
     )
 
+    news_client = NewsClient(api_key=os.getenv("NEWS_API_KEY", ""))
+
     strategies = [
         NearCertaintyStrategy("near_certainty", config["strategies"]["near_certainty"],
                               client, market_data, order_manager, capital),
@@ -90,6 +94,9 @@ async def run_bot_loop():
                              client, market_data, order_manager, capital),
         LogicalArbStrategy("logical_arb", config["strategies"]["logical_arb"],
                            client, market_data, order_manager, capital),
+        AITradingStrategy("ai_trader", config["strategies"].get("ai_trader", {"enabled": False}),
+                          client, market_data, order_manager, capital,
+                          news_client=news_client),
         CrossPlatformArbStrategy("cross_platform_arb", config["strategies"]["cross_platform_arb"],
                                  client, market_data, order_manager, capital),
         NewsCatalystStrategy("news_catalyst", config["strategies"]["news_catalyst"],

@@ -9,3 +9,4 @@ loguru
 httpx
 aiohttp
 cryptography
+anthropic>=0.40.0
