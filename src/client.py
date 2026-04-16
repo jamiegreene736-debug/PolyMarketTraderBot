@@ -227,12 +227,12 @@ class PolymarketClient:
         logger.info(f"Order placed: {intent} {quantity} @ ${price} on {market_slug} → id={result.get('id')}")
         return result
 
-    async def cancel_order(self, order_id: str) -> bool:
+    async def cancel_order(self, order_id: str, market_slug: str = "") -> bool:
         if self.dry_run:
             logger.info(f"[DRY RUN] Cancel order: {order_id}")
             return True
         try:
-            await self._retry(lambda: self._client.orders.cancel(order_id))
+            await self._retry(lambda: self._client.orders.cancel(order_id, {"marketSlug": market_slug}))
             logger.info(f"Order cancelled: {order_id}")
             return True
         except Exception as e:

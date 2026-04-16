@@ -81,7 +81,10 @@ class OrderManager:
             return None
 
     async def cancel_order(self, order_id: str) -> bool:
-        success = await self.client.cancel_order(order_id)
+        async with self._lock:
+            order = self._open_orders.get(order_id)
+            market_slug = order["market_slug"] if order else ""
+        success = await self.client.cancel_order(order_id, market_slug)
         if success:
             async with self._lock:
                 order = self._open_orders.pop(order_id, None)
