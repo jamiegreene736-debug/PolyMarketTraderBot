@@ -62,7 +62,7 @@ strategies:
     use_kelly_sizing: true
     kelly_fraction: 0.25
     # Ensemble: set ensemble_enabled: true and add OPENAI_API_KEY to env vars
-    ensemble_enabled: false
+    ensemble_enabled: true
     openai_model: gpt-4o-mini
     # Bayesian calibration — how much to trust AI per category (1.0 = full trust)
     calibration:
