@@ -190,7 +190,16 @@ class PolymarketClient:
 
     async def get_balance(self) -> dict:
         raw = await self._retry(lambda: self._client.account.balances())
-        return self._to_dict(raw)
+        data = self._to_dict(raw)
+        # SDK returns {"balances": [{"currentBalance": X, "buyingPower": Y, ...}]}
+        balances = data.get("balances", [])
+        if balances:
+            first = balances[0] if isinstance(balances[0], dict) else self._to_dict(balances[0])
+            return {
+                "balance": float(first.get("currentBalance", 0) or 0),
+                "availableBalance": float(first.get("buyingPower", first.get("currentBalance", 0)) or 0),
+            }
+        return data
 
     async def get_positions(self) -> list:
         raw = await self._retry(lambda: self._client.portfolio.positions())

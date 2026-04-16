@@ -1,7 +1,7 @@
 bot:
   poll_interval_seconds: 30
   dry_run: false
-  max_concurrent_orders: 40
+  max_concurrent_orders: 5          # Scaled for $12 balance (raise to 40 when funded)
   log_level: INFO
 
 capital:
