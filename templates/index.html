@@ -284,6 +284,7 @@
       <div class="status-dot stopped" id="statusDot"></div>
       <span class="status-text stopped" id="statusText">Checking...</span>
     </div>
+    <button onclick="resetAllData()" style="background:transparent; border:1px solid #374151; color:#64748b; padding:7px 14px; border-radius:8px; font-size:12px; font-weight:600; cursor:pointer;" title="Wipe all trades &amp; balance history">Reset Data</button>
     <button class="btn-control btn-start" id="controlBtn" onclick="handleControl()">Start</button>
   </div>
 </header>
@@ -740,6 +741,20 @@
     await fetch('/api/clear-logs', { method: 'POST' });
     lastLogCount = 0;
     logContainer.innerHTML = '<div class="log-line log-INFO">Logs cleared.</div>';
+  }
+
+  async function resetAllData() {
+    if (!confirm('Reset ALL data?\n\nThis wipes every trade, balance snapshot, and log from the database. The bot must be stopped first.\n\nThis cannot be undone.')) return;
+    const res = await fetch('/api/reset-data', { method: 'POST' });
+    if (res.ok) {
+      showToast('All data cleared — fresh start', 'success');
+      lastLogCount = 0;
+      logContainer.innerHTML = '<div class="log-line log-INFO">Data reset.</div>';
+      refreshPositions();
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.detail || 'Reset failed', 'error');
+    }
   }
 
   // Poll logs every 3 seconds

@@ -1,0 +1,9 @@
+*.db
+*.pyc
+__pycache__/
+.env
+.git
+.claude
+*.log
+logs/
+test_e2e.py

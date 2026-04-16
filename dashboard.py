@@ -310,6 +310,21 @@ async def api_clear_logs(_=Depends(verify_password)):
     return {"ok": True}
 
 
+@app.post("/api/reset-data")
+async def api_reset_data(_=Depends(verify_password)):
+    """Wipe all trades, balance snapshots, and logs. Bot must be stopped first."""
+    task = _bot_state.get("task")
+    if task and not task.done():
+        raise HTTPException(status_code=400, detail="Stop the bot before resetting data")
+    async with __import__('aiosqlite').connect('bot_data.db') as conn:
+        await conn.execute("DELETE FROM trades")
+        await conn.execute("DELETE FROM balance_snapshots")
+        await conn.execute("DELETE FROM bot_logs")
+        await conn.commit()
+    logger.info("All data reset via dashboard")
+    return {"ok": True}
+
+
 @app.get("/api/positions")
 async def api_positions(_=Depends(verify_password)):
     """Return all open in-memory positions with balance breakdown."""
