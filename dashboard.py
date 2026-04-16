@@ -49,6 +49,10 @@ _bot_state = {
     "task": None,               # asyncio.Task reference
 }
 
+# Live references set when the bot starts so API routes can read them
+_order_manager: "OrderManager | None" = None
+_capital: "CapitalManager | None" = None
+
 
 def load_config() -> dict:
     with open("config.yaml", "r") as f:
@@ -58,6 +62,7 @@ def load_config() -> dict:
 # ── Bot loop ──────────────────────────────────────────────────────────────────
 
 async def run_bot_loop():
+    global _order_manager, _capital
     config = load_config()
     bot_cfg = config.get("bot", {})
 
@@ -86,6 +91,10 @@ async def run_bot_loop():
     )
 
     news_client = NewsClient(api_key=os.getenv("NEWS_API_KEY", ""))
+
+    # Expose to API routes
+    _order_manager = order_manager
+    _capital = capital
 
     strategies = [
         # Run position monitor FIRST each tick so exits happen before new entries
@@ -269,3 +278,37 @@ async def api_clear_logs(_=Depends(verify_password)):
         await conn.execute("DELETE FROM bot_logs")
         await conn.commit()
     return {"ok": True}
+
+
+@app.get("/api/positions")
+async def api_positions(_=Depends(verify_password)):
+    """Return all open in-memory positions with balance breakdown."""
+    if _order_manager is None:
+        return {"positions": [], "cash_balance": 0, "position_value": 0, "total": 0}
+
+    positions = _order_manager.get_open_positions()
+    position_value = sum(p["price"] * p["quantity"] for p in positions)
+
+    cash = _capital.total_usdc if _capital else 0
+    return {
+        "positions": positions,
+        "cash_balance": round(cash, 2),
+        "position_value": round(position_value, 2),
+        "total": round(cash + position_value, 2),
+    }
+
+
+@app.post("/api/close-position/{order_id}")
+async def api_close_position(order_id: str, _=Depends(verify_password)):
+    """Manually cancel/close an open position by order ID."""
+    if _order_manager is None:
+        raise HTTPException(status_code=503, detail="Bot not running")
+
+    success = await _order_manager.cancel_order(order_id)
+    if success:
+        if _capital:
+            # Try to find which strategy owned this and release capital
+            # (best-effort — capital was already debited when the order was placed)
+            pass
+        return {"ok": True, "order_id": order_id}
+    raise HTTPException(status_code=400, detail=f"Could not close order {order_id}")

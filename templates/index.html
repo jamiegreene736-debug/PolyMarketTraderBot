@@ -196,6 +196,58 @@
 
     /* ── Full width row ── */
     .full-row { margin-bottom: 16px; }
+
+    /* ── Balance Bar ── */
+    .balance-bar {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .balance-card {
+      background: #151820;
+      border: 1px solid #1e2433;
+      border-radius: 12px;
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .balance-card .label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.8px; }
+    .balance-card .amount { font-size: 26px; font-weight: 700; color: #fff; }
+    .balance-card .sub { font-size: 12px; color: #475569; }
+    .balance-card.combined { border-color: #6366f1; }
+    .balance-card.combined .amount { color: #818cf8; }
+
+    /* ── Close button ── */
+    .btn-close-pos {
+      padding: 4px 12px;
+      border-radius: 6px;
+      border: 1px solid #ef4444;
+      background: transparent;
+      color: #ef4444;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .btn-close-pos:hover { background: #ef4444; color: #fff; }
+    .btn-close-pos:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* ── Toast ── */
+    #toast {
+      position: fixed; bottom: 24px; right: 24px;
+      background: #1e2433; border: 1px solid #2d3748;
+      color: #e2e8f0; padding: 12px 20px; border-radius: 10px;
+      font-size: 13px; font-weight: 500;
+      opacity: 0; transform: translateY(8px);
+      transition: all 0.2s; pointer-events: none;
+      z-index: 999;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
+    #toast.success { border-color: #22c55e; color: #4ade80; }
+    #toast.error { border-color: #ef4444; color: #f87171; }
   </style>
 </head>
 <body>
@@ -212,7 +264,28 @@
   </div>
 </header>
 
+<div id="toast"></div>
+
 <div class="container">
+
+  <!-- Balance Bar -->
+  <div class="balance-bar">
+    <div class="balance-card">
+      <div class="label">Cash Balance</div>
+      <div class="amount" id="cashBalance">—</div>
+      <div class="sub">Available USDC</div>
+    </div>
+    <div class="balance-card">
+      <div class="label">In Positions</div>
+      <div class="amount" id="positionValue">—</div>
+      <div class="sub" id="positionCount">— open trades</div>
+    </div>
+    <div class="balance-card combined">
+      <div class="label">Portfolio Total</div>
+      <div class="amount" id="totalBalance">—</div>
+      <div class="sub">Cash + positions</div>
+    </div>
+  </div>
 
   <!-- Stats Cards -->
   <div class="stats-grid">
@@ -275,6 +348,29 @@
           <p style="color:#475569; text-align:center; padding:40px 0;">No closed trades yet</p>
         {% endif %}
       </div>
+    </div>
+  </div>
+
+  <!-- Open Positions -->
+  <div class="panel full-row">
+    <div class="panel-header">Open Positions</div>
+    <div style="overflow-x:auto;">
+      <table>
+        <thead>
+          <tr>
+            <th>Strategy</th>
+            <th>Market</th>
+            <th>Side</th>
+            <th>Entry Price</th>
+            <th>Qty</th>
+            <th>Cost Basis</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="openPositionsBody">
+          <tr><td colspan="7" style="text-align:center; color:#475569; padding:32px;">Loading...</td></tr>
+        </tbody>
+      </table>
     </div>
   </div>
 
@@ -445,6 +541,89 @@
   // Poll status every 5 seconds
   pollStatus();
   setInterval(pollStatus, 5000);
+
+  // ── Toast ───────────────────────────────────────────────────────────────
+  const toast = document.getElementById('toast');
+  let toastTimer;
+  function showToast(msg, type = 'success') {
+    toast.textContent = msg;
+    toast.className = 'show ' + type;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toast.className = ''; }, 3000);
+  }
+
+  // ── Balance + Open Positions ────────────────────────────────────────────
+  async function refreshPositions() {
+    try {
+      const res  = await fetch('/api/positions');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      // Balance cards
+      document.getElementById('cashBalance').textContent    = '$' + data.cash_balance.toFixed(2);
+      document.getElementById('positionValue').textContent  = '$' + data.position_value.toFixed(2);
+      document.getElementById('totalBalance').textContent   = '$' + data.total.toFixed(2);
+      document.getElementById('positionCount').textContent  = data.positions.length + ' open trade' + (data.positions.length !== 1 ? 's' : '');
+
+      // Open positions table
+      const tbody = document.getElementById('openPositionsBody');
+      if (!data.positions || data.positions.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:#475569; padding:32px;">No open positions</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = data.positions.map(p => {
+        const cost      = (p.price * p.quantity).toFixed(2);
+        const side      = p.intent.replace('ORDER_INTENT_', '').replace(/_/g, ' ');
+        const sideColor = p.intent.includes('BUY_LONG') ? '#60a5fa' : '#f87171';
+        const label     = p.intent.includes('BUY_LONG') ? 'YES' : 'NO';
+        const market    = p.market_slug || '—';
+        const strategy  = (p.strategy || '—').replace(/_/g, ' ');
+        return `
+          <tr id="row-${p.order_id}">
+            <td>${strategy}</td>
+            <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${market}">${market}</td>
+            <td><span style="color:${sideColor}; font-weight:600;">${label}</span></td>
+            <td>$${parseFloat(p.price).toFixed(4)}</td>
+            <td>${parseFloat(p.quantity).toFixed(1)}</td>
+            <td>$${cost}</td>
+            <td>
+              <button class="btn-close-pos" onclick="closePosition('${p.order_id}', this)">
+                Close
+              </button>
+            </td>
+          </tr>`;
+      }).join('');
+    } catch (e) { /* silent */ }
+  }
+
+  async function closePosition(orderId, btn) {
+    if (!confirm('Close this position? This will cancel the order immediately.')) return;
+    btn.disabled = true;
+    btn.textContent = 'Closing...';
+    try {
+      const res = await fetch('/api/close-position/' + orderId, { method: 'POST' });
+      if (res.ok) {
+        showToast('Position closed', 'success');
+        const row = document.getElementById('row-' + orderId);
+        if (row) row.remove();
+        refreshPositions();
+      } else {
+        const err = await res.json();
+        showToast(err.detail || 'Failed to close', 'error');
+        btn.disabled = false;
+        btn.textContent = 'Close';
+      }
+    } catch (e) {
+      showToast('Network error', 'error');
+      btn.disabled = false;
+      btn.textContent = 'Close';
+    }
+  }
+
+  // Poll positions every 5 seconds
+  refreshPositions();
+  setInterval(refreshPositions, 5000);
 
   // ── Live Log Updates ────────────────────────────────────────────────────
 
