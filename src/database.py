@@ -140,6 +140,18 @@ async def log_to_db(level: str, message: str):
         await db.commit()
 
 
+async def get_recent_closed_pnls(limit: int = 20) -> list[float]:
+    """Return PnL values for the most recent closed trades (newest first)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT pnl FROM trades WHERE status = 'closed' ORDER BY resolved_at DESC LIMIT ?",
+            (limit,)
+        ) as cur:
+            rows = await cur.fetchall()
+    return [row["pnl"] for row in rows]
+
+
 async def get_open_trades_metadata() -> dict[str, dict]:
     """
     Return a dict of order_id → {strategy, question, market_slug, side, price, quantity}

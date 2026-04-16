@@ -235,6 +235,30 @@
     .btn-close-pos:hover { background: #ef4444; color: #fff; }
     .btn-close-pos:disabled { opacity: 0.4; cursor: not-allowed; }
 
+    /* ── Circuit Breaker Banner ── */
+    #cb-banner {
+      display: none;
+      background: #2d1a1a;
+      border: 1px solid #ef4444;
+      border-radius: 12px;
+      padding: 16px 24px;
+      margin-bottom: 20px;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    #cb-banner.active { display: flex; }
+    #cb-banner .cb-icon { font-size: 20px; flex-shrink: 0; }
+    #cb-banner .cb-text { flex: 1; }
+    #cb-banner .cb-title { color: #f87171; font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+    #cb-banner .cb-reason { color: #fca5a5; font-size: 12px; }
+    #cb-banner .btn-reset-cb {
+      padding: 8px 18px; border-radius: 8px; border: 1px solid #ef4444;
+      background: transparent; color: #ef4444; font-size: 12px; font-weight: 600;
+      cursor: pointer; transition: all 0.15s; flex-shrink: 0;
+    }
+    #cb-banner .btn-reset-cb:hover { background: #ef4444; color: #fff; }
+
     /* ── Toast ── */
     #toast {
       position: fixed; bottom: 24px; right: 24px;
@@ -267,6 +291,16 @@
 <div id="toast"></div>
 
 <div class="container">
+
+  <!-- Circuit Breaker Banner (hidden unless tripped) -->
+  <div id="cb-banner">
+    <div class="cb-icon">🛑</div>
+    <div class="cb-text">
+      <div class="cb-title">Circuit Breaker Tripped — All Trading Halted</div>
+      <div class="cb-reason" id="cb-reason">—</div>
+    </div>
+    <button class="btn-reset-cb" onclick="resetCircuitBreaker()">Reset &amp; Resume</button>
+  </div>
 
   <!-- Balance Bar -->
   <div class="balance-bar">
@@ -624,6 +658,39 @@
   // Poll positions every 5 seconds
   refreshPositions();
   setInterval(refreshPositions, 5000);
+
+  // ── Circuit Breaker ─────────────────────────────────────────────────────
+
+  const cbBanner = document.getElementById('cb-banner');
+  const cbReason = document.getElementById('cb-reason');
+
+  async function pollCircuitBreaker() {
+    try {
+      const res  = await fetch('/api/circuit-breaker');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.tripped) {
+        cbBanner.classList.add('active');
+        cbReason.textContent = data.reason || 'Unknown trigger';
+      } else {
+        cbBanner.classList.remove('active');
+      }
+    } catch (e) { /* silent fail */ }
+  }
+
+  async function resetCircuitBreaker() {
+    if (!confirm('Reset circuit breaker and resume trading?\n\nOnly do this after reviewing what triggered it.')) return;
+    const res = await fetch('/api/circuit-breaker/reset', { method: 'POST' });
+    if (res.ok) {
+      cbBanner.classList.remove('active');
+      showToast('Circuit breaker reset — bot resuming', 'success');
+    } else {
+      showToast('Reset failed — is the bot running?', 'error');
+    }
+  }
+
+  pollCircuitBreaker();
+  setInterval(pollCircuitBreaker, 10000);
 
   // ── Live Log Updates ────────────────────────────────────────────────────
 

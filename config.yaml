@@ -7,6 +7,12 @@ bot:
 capital:
   reserve_pct: 10
 
+circuit_breaker:
+  max_daily_loss_usdc: 50        # Stop all trading if we lose more than $50 in a single day
+  max_drawdown_pct: 0.20         # Stop if we're down more than 20% from session-start balance
+  max_consecutive_losses: 5      # Stop after 5 straight losing trades
+  max_orders_per_minute: 15      # Runaway loop guard — halt if >15 orders placed in 60s
+
 strategies:
 
   near_certainty:

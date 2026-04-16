@@ -38,6 +38,7 @@ from src.strategies.ai_trader import AITradingStrategy
 from src.strategies.position_monitor import PositionMonitorStrategy
 from src.strategies.whale_tracker import WhaleTrackerStrategy
 from src.news_client import NewsClient
+from src.circuit_breaker import CircuitBreaker
 
 load_dotenv()
 
@@ -52,6 +53,7 @@ _bot_state = {
 # Live references set when the bot starts so API routes can read them
 _order_manager: "OrderManager | None" = None
 _capital: "CapitalManager | None" = None
+_circuit_breaker: "CircuitBreaker | None" = None
 
 
 def load_config() -> dict:
@@ -62,7 +64,7 @@ def load_config() -> dict:
 # ── Bot loop ──────────────────────────────────────────────────────────────────
 
 async def run_bot_loop():
-    global _order_manager, _capital
+    global _order_manager, _capital, _circuit_breaker
     config = load_config()
     bot_cfg = config.get("bot", {})
 
@@ -95,6 +97,7 @@ async def run_bot_loop():
     # Expose to API routes
     _order_manager = order_manager
     _capital = capital
+    _circuit_breaker = CircuitBreaker(config, start_balance=capital.total_usdc)
 
     strategies = [
         # Run position monitor FIRST each tick so exits happen before new entries
@@ -154,8 +157,18 @@ async def run_bot_loop():
 
                 balance_refresh_counter += 1
 
+                # ── Circuit breaker check ─────────────────────────────────
+                recent_pnls = await db.get_recent_closed_pnls(limit=20)
+                cb_safe = await _circuit_breaker.check(capital.total_usdc, recent_pnls)
+                if not cb_safe:
+                    _bot_state["status"] = "error"
+                    _bot_state["last_error"] = f"Circuit breaker: {_circuit_breaker.trip_reason}"
+                    await client.cancel_all_orders()
+                    break
+
                 tick_msg = (
                     f"Tick #{balance_refresh_counter} | "
+                    f"balance=${capital.total_usdc:.2f} | "
                     f"open_orders={order_manager.get_total_open_orders()} | "
                     f"strategies={[s.name for s in enabled]}"
                 )
@@ -299,6 +312,47 @@ async def api_positions(_=Depends(verify_password)):
         "position_value": round(position_value, 2),
         "total": round(cash + position_value, 2),
     }
+
+
+@app.get("/api/circuit-breaker")
+async def api_circuit_breaker_status(_=Depends(verify_password)):
+    """Return circuit breaker state."""
+    if _circuit_breaker is None:
+        return {"tripped": False, "reason": "", "thresholds": {}}
+    cb = _circuit_breaker
+    return {
+        "tripped": cb.tripped,
+        "reason": cb.trip_reason,
+        "thresholds": {
+            "max_daily_loss_usdc": cb.max_daily_loss_usdc,
+            "max_drawdown_pct": cb.max_drawdown_pct,
+            "max_consecutive_losses": cb.max_consecutive_losses,
+            "max_orders_per_minute": cb.max_orders_per_minute,
+        },
+        "state": {
+            "consecutive_losses": cb._consecutive_losses,
+            "session_start_balance": round(cb.session_start_balance, 2),
+            "day_start_balance": round(cb.day_start_balance, 2),
+        },
+    }
+
+
+@app.post("/api/circuit-breaker/reset")
+async def api_circuit_breaker_reset(_=Depends(verify_password)):
+    """Manually reset the circuit breaker after reviewing the situation."""
+    if _circuit_breaker is None:
+        raise HTTPException(status_code=503, detail="Bot not running")
+    if _capital is None:
+        raise HTTPException(status_code=503, detail="Bot not running")
+    _circuit_breaker.reset(_capital.total_usdc)
+    # Also clear the bot error state so it can resume
+    if _bot_state["status"] == "error" and "Circuit breaker" in (_bot_state.get("last_error") or ""):
+        _bot_state["status"] = "running"
+        _bot_state["last_error"] = None
+    msg = "Circuit breaker manually reset via dashboard"
+    logger.info(msg)
+    await db.log_to_db("INFO", msg)
+    return {"ok": True}
 
 
 @app.post("/api/close-position/{order_id}")
