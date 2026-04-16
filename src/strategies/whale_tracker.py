@@ -144,7 +144,7 @@ class WhaleTrackerStrategy(BaseStrategy):
                     win_prob=win_prob,
                     net_return_pct=max(net_ret_pct, 0.005),
                     kelly_fraction=kelly_frac,
-                    min_size=10.0,
+                    min_size=1.0,
                     max_size=fallback_size,
                 )
             else:

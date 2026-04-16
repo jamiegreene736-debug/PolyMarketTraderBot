@@ -97,8 +97,8 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
                     win_prob=no_price,
                     net_return_pct=net_profit_pct / 100,
                     kelly_fraction=kelly_frac,
-                    min_size=10.0,
-                    max_size=fallback_size * 2,
+                    min_size=1.0,
+                    max_size=fallback_size,
                 )
             else:
                 order_size = fallback_size

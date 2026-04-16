@@ -291,8 +291,8 @@ class AITradingStrategy(BaseStrategy):
                 order_size = self.capital_manager.kelly_size(
                     self.name, win_prob, net_ret,
                     kelly_fraction=kelly_frac,
-                    min_size=10.0,
-                    max_size=fallback_size * 2,
+                    min_size=1.0,
+                    max_size=fallback_size,
                 )
             else:
                 order_size = fallback_size
