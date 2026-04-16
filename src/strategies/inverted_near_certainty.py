@@ -67,8 +67,9 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
             if best_ask > max_yes_price:
                 continue
 
-            # NO price = 1 - YES ask
-            no_price = round(1 - best_ask, 4)
+            # NO price derived from YES mid (more stable than ask)
+            mid = float(bbo.get("mid", best_ask))
+            no_price = round(1 - mid, 4)
 
             # Fee-aware profit (buying NO at no_price, resolves at 1.00)
             net_profit_pct = fees.net_profit_pct_near_certainty(no_price)
@@ -80,7 +81,7 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
 
             self.log(
                 f"NO opportunity: {question[:55]} | "
-                f"YES=${best_ask:.4f} → NO=${no_price:.4f} fee=${fee_cost:.4f} | "
+                f"YES=${mid:.4f} → NO=${no_price:.4f} fee=${fee_cost:.4f} | "
                 f"net={net_profit_pct:.2f}% | {hours_left:.1f}h left"
             )
 
@@ -91,7 +92,9 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
                 self.log("Capital limit reached", level="warning")
                 break
 
-            shares = round(order_size / no_price, 2)
+            # Price aggressively to cross the spread and get an immediate taker fill
+            taker_price = min(round(no_price + 0.03, 4), 0.99)
+            shares = round(order_size / taker_price, 2)
 
             if not self.capital_manager.allocate(self.name, order_size):
                 break
@@ -100,9 +103,10 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
                 market_slug=slug,
                 question=question,
                 intent="ORDER_INTENT_BUY_SHORT",
-                price=no_price,
+                price=taker_price,
                 quantity=shares,
                 strategy=self.name,
+                tif="TIME_IN_FORCE_FILL_OR_KILL",
             )
 
             if order_id:

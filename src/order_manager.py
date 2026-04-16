@@ -20,7 +20,8 @@ class OrderManager:
         self._rate_limit = 8                         # max requests per second
 
     async def place_order(self, market_slug: str, question: str, intent: str,
-                          price: float, quantity: float, strategy: str) -> str | None:
+                          price: float, quantity: float, strategy: str,
+                          tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL") -> str | None:
         async with self._lock:
             if len(self._open_orders) >= self.max_concurrent:
                 logger.warning(f"Max concurrent orders ({self.max_concurrent}) reached, skipping")
@@ -38,6 +39,7 @@ class OrderManager:
                 intent=intent,
                 price=price,
                 quantity=quantity,
+                tif=tif,
             )
             order_id = result.get("id")
             if not order_id:

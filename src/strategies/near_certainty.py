@@ -56,24 +56,25 @@ class NearCertaintyStrategy(BaseStrategy):
             try:
                 best_bid = float(bbo.get("bid", {}).get("price", 0))
                 best_ask = float(bbo.get("ask", {}).get("price", 1))
+                mid      = float(bbo.get("mid", (best_bid + best_ask) / 2))
             except (TypeError, ValueError):
                 continue
 
             if best_bid < min_price:
                 continue
 
-            # Fee-aware profitability check
-            net_profit_pct = fees.net_profit_pct_near_certainty(best_ask)
+            # Fee-aware profitability check (use mid for fee calc)
+            net_profit_pct = fees.net_profit_pct_near_certainty(mid)
             if net_profit_pct < min_net_return:
                 self.log(f"Skipping {slug}: net return {net_profit_pct:.2f}% < {min_net_return}% minimum")
                 continue
 
             hours_left = self.market_data._hours_to_resolution(market)
-            fee_cost   = fees.taker_fee_per_share(best_ask)
+            fee_cost   = fees.taker_fee_per_share(mid)
 
             self.log(
                 f"Opportunity: {question[:55]} | "
-                f"ask=${best_ask:.4f} fee=${fee_cost:.4f} | "
+                f"mid=${mid:.4f} fee=${fee_cost:.4f} | "
                 f"net={net_profit_pct:.2f}% | {hours_left:.1f}h left"
             )
 
@@ -84,7 +85,10 @@ class NearCertaintyStrategy(BaseStrategy):
                 self.log("Capital limit reached", level="warning")
                 break
 
-            shares = round(order_size / best_ask, 2)
+            # Price aggressively above the ask to guarantee an immediate taker fill.
+            # On a CLOB this still fills at the resting ask price — we don't overpay.
+            taker_price = min(round(best_ask + 0.03, 4), 0.99)
+            shares = round(order_size / taker_price, 2)
 
             if not self.capital_manager.allocate(self.name, order_size):
                 break
@@ -93,9 +97,10 @@ class NearCertaintyStrategy(BaseStrategy):
                 market_slug=slug,
                 question=question,
                 intent="ORDER_INTENT_BUY_LONG",
-                price=best_ask,
+                price=taker_price,
                 quantity=shares,
                 strategy=self.name,
+                tif="TIME_IN_FORCE_FILL_OR_KILL",
             )
 
             if order_id:
