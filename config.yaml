@@ -19,7 +19,7 @@ strategies:
     enabled: true
     capital_pct: 20
     min_price: 0.93
-    max_hours_to_resolution: 72      # Only buy markets resolving within 3 days
+    max_hours_to_resolution: 168     # Only buy markets resolving within 1 week
     min_market_volume: 0
     order_size_usdc: 2               # Scaled for $12 balance (raise to 50 when funded)
     min_net_return_pct: 1.0
@@ -30,7 +30,7 @@ strategies:
     enabled: true
     capital_pct: 20
     max_yes_price: 0.07              # YES must be priced below $0.07
-    max_hours_to_resolution: 72      # Only buy markets resolving within 3 days
+    max_hours_to_resolution: 168     # Only buy markets resolving within 1 week
     min_market_volume: 0
     order_size_usdc: 2               # Scaled for $12 balance
     min_net_return_pct: 1.0
