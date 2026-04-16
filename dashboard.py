@@ -221,8 +221,8 @@ async def run_bot_loop():
         await client.cancel_all_orders()
         await client.close()
         logger.info("Bot stopped cleanly.")
-
-    _bot_state["status"] = "stopped"
+    # Do NOT set status here — supervisor owns the status after a crash.
+    # Only /api/stop sets status="stopped" (user-requested).
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
