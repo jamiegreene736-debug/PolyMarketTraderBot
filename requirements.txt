@@ -10,3 +10,4 @@ httpx
 aiohttp
 cryptography
 anthropic>=0.40.0
+openai>=1.30.0

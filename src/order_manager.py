@@ -122,6 +122,15 @@ class OrderManager:
                     ]
         await db.close_trade(order_id, pnl)
 
+    def get_open_positions(self, exclude_strategies: list[str] | None = None) -> list[dict]:
+        """Return a snapshot of all tracked open positions, optionally filtering out strategies."""
+        exclude = set(exclude_strategies or [])
+        return [
+            dict(order)
+            for order in self._open_orders.values()
+            if order.get("strategy") not in exclude
+        ]
+
     def get_market_order_count(self, market_slug: str) -> int:
         return len(self._market_orders.get(market_slug, []))
 

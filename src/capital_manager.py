@@ -50,6 +50,39 @@ class CapitalManager:
         current = self._allocated.get(strategy, 0.0)
         self._allocated[strategy] = max(0.0, current - amount)
 
+    def kelly_size(
+        self,
+        strategy: str,
+        win_prob: float,
+        net_return_pct: float,
+        kelly_fraction: float = 0.25,
+        min_size: float = 10.0,
+        max_size: float = 300.0,
+    ) -> float:
+        """
+        Fractional Kelly criterion bet sizing.
+
+        win_prob       — estimated probability of winning (0–1)
+        net_return_pct — net profit per dollar risked if we win (e.g. 0.06 for 6%)
+        kelly_fraction — safety multiplier; 0.25 = quarter-Kelly (recommended)
+
+        Kelly formula: f* = (b·p − q) / b
+          where b = net odds (net_return_pct), p = win_prob, q = 1 − p
+        """
+        if win_prob <= 0 or net_return_pct <= 0:
+            return min_size
+
+        b = net_return_pct
+        p = min(win_prob, 0.9999)
+        q = 1.0 - p
+
+        kelly_f = (b * p - q) / b
+        kelly_f = max(0.0, kelly_f) * kelly_fraction
+
+        bet = kelly_f * self.total_usdc
+        available = self.strategy_available(strategy)
+        return round(max(min_size, min(bet, max_size, available)), 2)
+
     def summary(self) -> dict:
         return {
             "total_usdc": round(self.total_usdc, 2),

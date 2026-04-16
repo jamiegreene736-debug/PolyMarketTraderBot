@@ -11,25 +11,29 @@ strategies:
 
   near_certainty:
     enabled: true
-    capital_pct: 25
+    capital_pct: 20
     min_price: 0.93
     max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
     min_market_volume: 0
-    order_size_usdc: 50
+    order_size_usdc: 50              # Fallback if Kelly is off
     min_net_return_pct: 1.0
+    use_kelly_sizing: true           # Size by edge magnitude (Kelly criterion)
+    kelly_fraction: 0.25             # Quarter-Kelly for safety
 
   inverted_near_certainty:           # Buy NO on markets where YES < 7 cents
     enabled: true
-    capital_pct: 25
+    capital_pct: 20
     max_yes_price: 0.07              # YES must be priced below $0.07
     max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
     min_market_volume: 0
     order_size_usdc: 50
     min_net_return_pct: 1.0
+    use_kelly_sizing: true
+    kelly_fraction: 0.25
 
   market_making:
     enabled: true
-    capital_pct: 30
+    capital_pct: 25
     min_daily_volume: 0              # sorts by volume, makes markets on highest-vol first
     spread_pct: 0.02
     max_open_orders_per_market: 2
@@ -39,22 +43,52 @@ strategies:
 
   logical_arb:
     enabled: true
-    capital_pct: 20
+    capital_pct: 15
     min_arb_pct: 0.03
     order_size_usdc: 100
     min_outcomes: 2
 
   ai_trader:
     enabled: true
-    capital_pct: 20                  # 20% of portfolio for AI trades
-    order_size_usdc: 50
+    capital_pct: 15                  # Reduced — whale_tracker is a new alpha source
+    order_size_usdc: 50              # Fallback if Kelly is off
     min_edge_pct: 0.12               # Need ≥12% gap between AI estimate and market price
-    min_market_price: 0.10           # Skip markets priced below 10% (near-certain NO)
-    max_market_price: 0.90           # Skip markets priced above 90% (near-certain YES)
+    min_market_price: 0.10
+    max_market_price: 0.90
     max_markets_per_run: 8           # Analyse max 8 markets per hour (API cost control)
     run_interval_seconds: 3600       # Run every 60 minutes
     cache_ttl_seconds: 7200          # Cache AI estimates for 2 hours
-    model: claude-haiku-4-5-20251001 # Fast + cheap for high-frequency analysis
+    model: claude-haiku-4-5-20251001
+    use_kelly_sizing: true
+    kelly_fraction: 0.25
+    # Ensemble: set ensemble_enabled: true and add OPENAI_API_KEY to env vars
+    ensemble_enabled: false
+    openai_model: gpt-4o-mini
+    # Bayesian calibration — how much to trust AI per category (1.0 = full trust)
+    calibration:
+      politics: 0.80
+      sports: 0.65
+      crypto: 0.60
+      finance: 0.70
+      weather: 0.55
+      default: 0.75
+
+  whale_tracker:
+    enabled: true
+    capital_pct: 15                  # 15% of portfolio for momentum trades
+    order_size_usdc: 50
+    min_move_pct: 0.05               # 5% price move triggers entry
+    lookback_ticks: 4                # Compare to 4 ticks ago (~2 min at 30s/tick)
+    top_markets: 30                  # Monitor top 30 markets by volume
+    min_net_return_pct: 0.5          # Lower bar than near-certainty — short-term hold
+    use_kelly_sizing: true
+    kelly_fraction: 0.20             # More conservative for momentum
+
+  position_monitor:
+    enabled: true
+    take_profit_pct: 0.15            # Exit when position is up 15%
+    stop_loss_pct: 0.10              # Exit when position is down 10%
+    exit_size_usdc: 200              # Max USDC per exit order
 
   cross_platform_arb:
     enabled: false                   # Disabled — Kalshi approval pending

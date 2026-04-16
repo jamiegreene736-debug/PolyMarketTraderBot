@@ -28,8 +28,10 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
         max_yes_price    = self.config.get("max_yes_price", 0.07)
         max_hours        = self.config.get("max_hours_to_resolution", 72)
         min_volume       = self.config.get("min_market_volume", 1000)
-        order_size       = self.config.get("order_size_usdc", 50)
+        fallback_size    = self.config.get("order_size_usdc", 50)
         min_net_return   = self.config.get("min_net_return_pct", 1.0)
+        use_kelly        = self.config.get("use_kelly_sizing", True)
+        kelly_frac       = self.config.get("kelly_fraction", 0.25)
 
         # If max_hours is large (>720), scan all active markets
         if max_hours >= 720:
@@ -87,6 +89,19 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
 
             if self.order_manager.get_market_order_count(slug) > 0:
                 continue
+
+            # Kelly sizing: win_prob ≈ no_price; net return = net_profit_pct/100
+            if use_kelly:
+                order_size = self.capital_manager.kelly_size(
+                    self.name,
+                    win_prob=no_price,
+                    net_return_pct=net_profit_pct / 100,
+                    kelly_fraction=kelly_frac,
+                    min_size=10.0,
+                    max_size=fallback_size * 2,
+                )
+            else:
+                order_size = fallback_size
 
             if not self.capital_manager.can_allocate(self.name, order_size):
                 self.log("Capital limit reached", level="warning")

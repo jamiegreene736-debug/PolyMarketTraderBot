@@ -35,6 +35,8 @@ from src.strategies.logical_arb import LogicalArbStrategy
 from src.strategies.cross_platform import CrossPlatformArbStrategy
 from src.strategies.news_catalyst import NewsCatalystStrategy
 from src.strategies.ai_trader import AITradingStrategy
+from src.strategies.position_monitor import PositionMonitorStrategy
+from src.strategies.whale_tracker import WhaleTrackerStrategy
 from src.news_client import NewsClient
 
 load_dotenv()
@@ -86,6 +88,9 @@ async def run_bot_loop():
     news_client = NewsClient(api_key=os.getenv("NEWS_API_KEY", ""))
 
     strategies = [
+        # Run position monitor FIRST each tick so exits happen before new entries
+        PositionMonitorStrategy("position_monitor", config["strategies"].get("position_monitor", {"enabled": True}),
+                                client, market_data, order_manager, capital),
         NearCertaintyStrategy("near_certainty", config["strategies"]["near_certainty"],
                               client, market_data, order_manager, capital),
         InvertedNearCertaintyStrategy("inverted_near_certainty", config["strategies"]["inverted_near_certainty"],
@@ -97,6 +102,8 @@ async def run_bot_loop():
         AITradingStrategy("ai_trader", config["strategies"].get("ai_trader", {"enabled": False}),
                           client, market_data, order_manager, capital,
                           news_client=news_client),
+        WhaleTrackerStrategy("whale_tracker", config["strategies"].get("whale_tracker", {"enabled": True}),
+                             client, market_data, order_manager, capital),
         CrossPlatformArbStrategy("cross_platform_arb", config["strategies"]["cross_platform_arb"],
                                  client, market_data, order_manager, capital),
         NewsCatalystStrategy("news_catalyst", config["strategies"]["news_catalyst"],
