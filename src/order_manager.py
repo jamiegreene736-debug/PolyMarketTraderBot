@@ -122,6 +122,92 @@ class OrderManager:
                     ]
         await db.close_trade(order_id, pnl)
 
+    async def sync_from_exchange(self) -> int:
+        """
+        On bot startup, fetch all open orders from the exchange and repopulate
+        _open_orders / _market_orders so position tracking survives restarts.
+
+        Fields from the exchange are normalised; strategy and question are
+        back-filled from the local DB where available.
+
+        Returns the number of orders synced.
+        """
+        try:
+            raw_orders = await self.client.get_open_orders()
+        except Exception as e:
+            logger.warning(f"sync_from_exchange: could not fetch open orders: {e}")
+            return 0
+
+        if not raw_orders:
+            logger.info("sync_from_exchange: no open orders on exchange")
+            return 0
+
+        # Load DB metadata so we can restore strategy/question
+        try:
+            db_meta = await db.get_open_trades_metadata()
+        except Exception:
+            db_meta = {}
+
+        synced = 0
+        async with self._lock:
+            for o in raw_orders:
+                # Normalise id
+                order_id = (o.get("id") or o.get("orderId") or
+                            o.get("order_id") or "")
+                if not order_id:
+                    continue
+
+                # Normalise market slug
+                slug = (o.get("marketSlug") or o.get("market_slug") or
+                        o.get("slug") or o.get("conditionId") or "")
+
+                # Normalise intent / side
+                intent = (o.get("intent") or o.get("side") or
+                          o.get("orderType") or "ORDER_INTENT_BUY_LONG")
+
+                # Normalise price — can be float, str, or nested {"value": "0.97"}
+                raw_price = o.get("price", 0)
+                if isinstance(raw_price, dict):
+                    raw_price = raw_price.get("value", 0)
+                try:
+                    price = float(raw_price)
+                except (TypeError, ValueError):
+                    price = 0.0
+
+                # Normalise quantity
+                try:
+                    quantity = float(o.get("quantity") or o.get("size") or 0)
+                except (TypeError, ValueError):
+                    quantity = 0.0
+
+                # Back-fill from DB if we have a record
+                meta = db_meta.get(order_id, {})
+                strategy = meta.get("strategy", "synced")
+                question  = meta.get("question", slug)
+
+                # Skip if already tracked (e.g. bot placed it this session)
+                if order_id in self._open_orders:
+                    continue
+
+                self._open_orders[order_id] = {
+                    "order_id": order_id,
+                    "market_slug": slug,
+                    "intent": intent,
+                    "price": price,
+                    "quantity": quantity,
+                    "strategy": strategy,
+                    "question": question,
+                }
+                if slug:
+                    self._market_orders.setdefault(slug, []).append(order_id)
+                synced += 1
+
+        logger.info(f"sync_from_exchange: synced {synced} open order(s) from exchange "
+                    f"(total tracked: {len(self._open_orders)})")
+        await db.log_to_db("INFO",
+            f"[order_manager] Startup sync: {synced} open orders restored from exchange")
+        return synced
+
     def get_open_positions(self, exclude_strategies: list[str] | None = None) -> list[dict]:
         """Return a snapshot of all tracked open positions, optionally filtering out strategies."""
         exclude = set(exclude_strategies or [])

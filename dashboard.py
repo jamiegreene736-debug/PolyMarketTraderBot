@@ -123,6 +123,9 @@ async def run_bot_loop():
     poll_interval = bot_cfg.get("poll_interval_seconds", 30)
     balance_refresh_counter = 0
 
+    # Restore open positions from exchange on every startup
+    await order_manager.sync_from_exchange()
+
     msg = f"Bot started — active strategies: {[s.name for s in enabled]}"
     logger.info(msg)
     await db.log_to_db("INFO", msg)

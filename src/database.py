@@ -140,6 +140,22 @@ async def log_to_db(level: str, message: str):
         await db.commit()
 
 
+async def get_open_trades_metadata() -> dict[str, dict]:
+    """
+    Return a dict of order_id → {strategy, question, market_slug, side, price, quantity}
+    for all trades currently marked 'open' in the DB.
+    Used by OrderManager.sync_from_exchange() to restore strategy/question on restart.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT order_id, strategy, question, market_slug, side, price, quantity "
+            "FROM trades WHERE status = 'open' AND order_id IS NOT NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+    return {row["order_id"]: dict(row) for row in rows}
+
+
 async def get_dashboard_stats() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
