@@ -19,7 +19,7 @@ strategies:
     enabled: true
     capital_pct: 20
     min_price: 0.93
-    max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
+    max_hours_to_resolution: 72      # Only buy markets resolving within 3 days
     min_market_volume: 0
     order_size_usdc: 2               # Scaled for $12 balance (raise to 50 when funded)
     min_net_return_pct: 1.0
@@ -30,7 +30,7 @@ strategies:
     enabled: true
     capital_pct: 20
     max_yes_price: 0.07              # YES must be priced below $0.07
-    max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
+    max_hours_to_resolution: 72      # Only buy markets resolving within 3 days
     min_market_volume: 0
     order_size_usdc: 2               # Scaled for $12 balance
     min_net_return_pct: 1.0
@@ -93,8 +93,15 @@ strategies:
   position_monitor:
     enabled: true
     take_profit_pct: 0.15            # Exit when position is up 15%
-    stop_loss_pct: 0.10              # Exit when position is down 10%
+    stop_loss_pct: 0.08              # Exit when position is down 8% (tighter for fast trading)
     exit_size_usdc: 200              # Max USDC per exit order
+    max_hold_hours:                  # Force-exit after this many hours (per strategy)
+      whale_tracker: 2               # Momentum fades in <1h; 2h is the hard cap
+      ai_trader: 6                   # AI edge window — price converges within hours
+      logical_arb: 24               # Arb gaps rarely persist more than a day
+      near_certainty: 48            # Fast-resolution holds only; exit if not filled
+      inverted_near_certainty: 48
+      default: 24                   # Catch-all for any strategy not listed
 
   cross_platform_arb:
     enabled: false                   # Disabled — Kalshi approval pending

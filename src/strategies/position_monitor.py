@@ -1,64 +1,82 @@
 """
-Position Monitor — Auto Take-Profit / Stop-Loss
--------------------------------------------------
-Runs every tick and checks every open directional position against the
-current market price. When a position hits its TP or SL threshold, the
-monitor places an exit order (the opposite side) to close the trade.
-
-Market-making quotes are excluded — they are managed by the market-making
-strategy itself via cancel_stale_orders.
+Position Monitor — Auto Take-Profit / Stop-Loss / Max Hold Time
+---------------------------------------------------------------
+Runs every tick and checks every open directional position against:
+  1. Take-profit threshold
+  2. Stop-loss threshold
+  3. Maximum hold time (per strategy) — exits at market price when expired
 
 TP/SL logic:
   LONG (BUY_LONG / YES position)
-    entry_price  = price paid per share
-    TP triggered  when current_bid >= entry_price × (1 + tp_pct)
-    SL triggered  when current_bid <= entry_price × (1 − sl_pct)
-    Exit action:  place BUY_SHORT (sell YES / buy NO) at current ask
+    TP: current_bid >= entry_price × (1 + tp_pct)  OR  current_bid >= 0.99 (near-certainty cap)
+    SL: current_bid <= entry_price × (1 − sl_pct)
+    Exit: place BUY_SHORT at current ask
 
   SHORT (BUY_SHORT / NO position)
-    entry_no_price  = 1 − entry_price  (the YES price when we entered)
-    current_no_bid  = 1 − current_yes_ask
-    TP triggered     when current_no_bid >= entry_no_price × (1 + tp_pct)
-    SL triggered     when current_no_bid <= entry_no_price × (1 − sl_pct)
-    Exit action:  place BUY_LONG (sell NO / buy YES) at current bid
+    entry_no  = 1 − entry_price
+    no_bid    = 1 − current_yes_ask
+    TP: no_bid >= entry_no × (1 + tp_pct)  OR  no_bid >= 0.99
+    SL: no_bid <= entry_no × (1 − sl_pct)
+    Exit: place BUY_LONG at current bid
+
+Max hold time:
+  If a position has been open longer than the strategy's max_hold_hours,
+  it is exited at market price regardless of TP/SL. This prevents trades
+  from sitting open for days when the edge window has closed.
 """
 
-import asyncio
+import time
 from src.strategies.base import BaseStrategy
 
 
-# Strategies whose orders should NOT be monitored for TP/SL
+# Strategies whose orders are managed elsewhere (not TP/SL monitored)
 _EXCLUDED_STRATEGIES = {"market_making"}
+
+# Near-certainty strategies use an absolute TP near $1.00, not pct-based
+_NEAR_CERTAINTY_STRATEGIES = {"near_certainty", "inverted_near_certainty"}
+_NEAR_CERTAINTY_TP_THRESHOLD = 0.99   # exit when price reaches $0.99
 
 
 class PositionMonitorStrategy(BaseStrategy):
-    """
-    Monitors all open directional positions and exits them at TP or SL.
-    Designed to run on every tick (same poll_interval as the main loop).
-    """
 
     async def run(self):
         if not self.enabled:
             return
 
-        tp_pct    = self.config.get("take_profit_pct", 0.15)   # e.g. 0.15 = exit when up 15%
-        sl_pct    = self.config.get("stop_loss_pct", 0.10)     # e.g. 0.10 = exit when down 10%
-        exit_size = self.config.get("exit_size_usdc", 200)     # max USDC per exit order
+        tp_pct    = self.config.get("take_profit_pct", 0.15)
+        sl_pct    = self.config.get("stop_loss_pct", 0.08)
+        exit_size = self.config.get("exit_size_usdc", 200)
+
+        # Per-strategy max hold times (hours → seconds). None = no limit.
+        hold_cfg  = self.config.get("max_hold_hours", {})
+        default_max = hold_cfg.get("default", 24) if isinstance(hold_cfg, dict) else 24
+
+        def max_hold_seconds(strategy: str) -> float | None:
+            if not isinstance(hold_cfg, dict):
+                return default_max * 3600
+            hours = hold_cfg.get(strategy)
+            if hours is None:
+                hours = hold_cfg.get("default", default_max)
+            return float(hours) * 3600
 
         positions = self.order_manager.get_open_positions(
             exclude_strategies=list(_EXCLUDED_STRATEGIES)
         )
-
         if not positions:
             return
 
+        now  = time.time()
         exits = 0
+
         for pos in positions:
             order_id    = pos["order_id"]
             slug        = pos["market_slug"]
             intent      = pos["intent"]
             entry_price = pos["price"]
             quantity    = pos["quantity"]
+            strategy    = pos.get("strategy", "")
+            placed_at   = pos.get("placed_at", now)
+            age_hours   = (now - placed_at) / 3600
 
             bbo = await self.market_data.get_bbo(slug)
             if not bbo:
@@ -70,21 +88,34 @@ class PositionMonitorStrategy(BaseStrategy):
             except (TypeError, ValueError):
                 continue
 
-            exit_intent  = None
-            exit_price   = None
-            trigger      = None
+            exit_intent = None
+            exit_price  = None
+            trigger     = None
 
-            if intent == "ORDER_INTENT_BUY_LONG":
-                # YES position — profit when YES price rises
-                tp_threshold = entry_price * (1 + tp_pct)
+            # ── Check max hold time first ─────────────────────────────────
+            mhs = max_hold_seconds(strategy)
+            if mhs is not None and (now - placed_at) >= mhs:
+                trigger = f"MAX_HOLD({age_hours:.1f}h)"
+                if intent == "ORDER_INTENT_BUY_LONG":
+                    exit_intent = "ORDER_INTENT_BUY_SHORT"
+                    no_price    = round(1.0 - current_bid, 4)
+                    exit_price  = max(0.01, no_price - 0.02)
+                else:
+                    exit_intent = "ORDER_INTENT_BUY_LONG"
+                    exit_price  = min(0.99, current_ask + 0.02)
+
+            # ── TP / SL (only if max-hold didn't fire) ────────────────────
+            elif intent == "ORDER_INTENT_BUY_LONG":
+                is_nc = strategy in _NEAR_CERTAINTY_STRATEGIES
+                tp_threshold = (_NEAR_CERTAINTY_TP_THRESHOLD if is_nc
+                                else entry_price * (1 + tp_pct))
                 sl_threshold = entry_price * (1 - sl_pct)
 
                 if current_bid >= tp_threshold:
                     trigger     = "TP"
                     exit_intent = "ORDER_INTENT_BUY_SHORT"
                     no_price    = round(1.0 - current_bid, 4)
-                    exit_price  = max(0.01, no_price - 0.02)   # aggressive taker (sell into bid)
-
+                    exit_price  = max(0.01, no_price - 0.02)
                 elif current_bid <= sl_threshold:
                     trigger     = "SL"
                     exit_intent = "ORDER_INTENT_BUY_SHORT"
@@ -92,18 +123,17 @@ class PositionMonitorStrategy(BaseStrategy):
                     exit_price  = max(0.01, no_price - 0.02)
 
             elif intent == "ORDER_INTENT_BUY_SHORT":
-                # NO position — profit when YES price falls (NO price rises)
-                entry_no  = round(1.0 - entry_price, 4)
-                current_no_bid = round(1.0 - current_ask, 4)   # NO bid ≈ 1 − YES ask
-
-                tp_threshold = entry_no * (1 + tp_pct)
+                entry_no     = round(1.0 - entry_price, 4)
+                current_no_bid = round(1.0 - current_ask, 4)
+                is_nc = strategy in _NEAR_CERTAINTY_STRATEGIES
+                tp_threshold = (_NEAR_CERTAINTY_TP_THRESHOLD if is_nc
+                                else entry_no * (1 + tp_pct))
                 sl_threshold = entry_no * (1 - sl_pct)
 
                 if current_no_bid >= tp_threshold:
                     trigger     = "TP"
                     exit_intent = "ORDER_INTENT_BUY_LONG"
-                    exit_price  = min(0.99, current_ask + 0.02)  # aggressive taker
-
+                    exit_price  = min(0.99, current_ask + 0.02)
                 elif current_no_bid <= sl_threshold:
                     trigger     = "SL"
                     exit_intent = "ORDER_INTENT_BUY_LONG"
@@ -119,15 +149,13 @@ class PositionMonitorStrategy(BaseStrategy):
             )
 
             self.log(
-                f"{trigger} hit | {pos.get('strategy','?')} | {slug[:35]} | "
-                f"entry=${entry_price:.4f} current=${current_bid:.4f} "
-                f"est_pnl=${pnl_est:.2f} | placing exit {exit_intent}"
+                f"{trigger} | {strategy} | {slug[:35]} | "
+                f"entry=${entry_price:.4f} now=${current_bid:.4f} "
+                f"age={age_hours:.1f}h est_pnl=${pnl_est:.2f}"
             )
 
-            # Cancel the original tracked order first (removes it from our books)
             await self.order_manager.cancel_order(order_id)
 
-            # Place the exit order
             exit_qty = min(quantity, round(exit_size / max(exit_price, 0.01), 2))
             oid = await self.order_manager.place_order(
                 market_slug=slug,
@@ -143,7 +171,7 @@ class PositionMonitorStrategy(BaseStrategy):
                 await self.order_manager.mark_filled(oid, pnl=pnl_est)
                 exits += 1
             else:
-                self.log(f"Exit order failed for {slug} — position remains open", level="warning")
+                self.log(f"Exit order failed for {slug} — position stays open", level="warning")
 
         if exits:
-            self.log(f"Closed {exits} position(s) via TP/SL this tick")
+            self.log(f"Closed {exits} position(s) this tick")

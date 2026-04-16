@@ -161,7 +161,7 @@ async def get_open_trades_metadata() -> dict[str, dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT order_id, strategy, question, market_slug, side, price, quantity "
+            "SELECT order_id, strategy, question, market_slug, side, price, quantity, timestamp "
             "FROM trades WHERE status = 'open' AND order_id IS NOT NULL"
         ) as cur:
             rows = await cur.fetchall()

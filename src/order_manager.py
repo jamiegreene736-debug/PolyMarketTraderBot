@@ -1,4 +1,5 @@
 import asyncio
+import time
 from loguru import logger
 from src.client import PolymarketClient
 from src import database as db
@@ -56,6 +57,7 @@ class OrderManager:
                     "price": price,
                     "quantity": quantity,
                     "strategy": strategy,
+                    "placed_at": time.time(),
                 }
                 self._market_orders.setdefault(market_slug, []).append(order_id)
 
@@ -189,6 +191,18 @@ class OrderManager:
                 if order_id in self._open_orders:
                     continue
 
+                # Restore placed_at from DB timestamp if available
+                db_ts = meta.get("timestamp")
+                if db_ts:
+                    try:
+                        from datetime import datetime, timezone
+                        placed_at = datetime.fromisoformat(db_ts).replace(
+                            tzinfo=timezone.utc).timestamp()
+                    except Exception:
+                        placed_at = time.time()
+                else:
+                    placed_at = time.time()
+
                 self._open_orders[order_id] = {
                     "order_id": order_id,
                     "market_slug": slug,
@@ -197,6 +211,7 @@ class OrderManager:
                     "quantity": quantity,
                     "strategy": strategy,
                     "question": question,
+                    "placed_at": placed_at,
                 }
                 if slug:
                     self._market_orders.setdefault(slug, []).append(order_id)
