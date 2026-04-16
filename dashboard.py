@@ -309,6 +309,7 @@ async def api_stats(_=Depends(verify_password)):
 async def api_status(_=Depends(verify_password)):
     state = dict(_bot_state)
     state.pop("task", None)
+    state.pop("supervisor", None)
 
     # Auto-detect stale heartbeat
     hb = state.get("last_heartbeat")
