@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import yaml
+import aiosqlite
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.responses import HTMLResponse
@@ -159,7 +160,13 @@ async def run_bot_loop():
                             if val is not None:
                                 balance = float(val)
                                 capital.update_balance(balance)
-                                await db.snapshot_balance(balance, 0.0, 0.0)
+                                # Fetch real realized PnL for the chart
+                                try:
+                                    stats_snap = await db.get_dashboard_stats()
+                                    realized_pnl = stats_snap.get("total_pnl", 0.0)
+                                except Exception:
+                                    realized_pnl = 0.0
+                                await db.snapshot_balance(balance, realized_pnl, 0.0)
                                 msg = f"Balance refreshed: ${balance:.2f} USDC"
                                 logger.info(msg)
                                 await db.log_to_db("INFO", msg)
@@ -341,6 +348,21 @@ async def api_positions(_=Depends(verify_password)):
         "position_value": round(position_value, 2),
         "total": round(cash + position_value, 2),
     }
+
+
+@app.get("/api/closed-trades")
+async def api_closed_trades(_=Depends(verify_password)):
+    """Return closed and cancelled trades, newest first."""
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        async with conn.execute("""
+            SELECT * FROM trades
+            WHERE status IN ('closed', 'cancelled')
+            ORDER BY COALESCE(resolved_at, timestamp) DESC
+            LIMIT 100
+        """) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    return {"trades": rows}
 
 
 @app.get("/api/circuit-breaker")

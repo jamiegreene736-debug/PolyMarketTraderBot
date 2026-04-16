@@ -409,46 +409,28 @@
     </div>
   </div>
 
-  <!-- Recent Trades -->
+  <!-- Closed Trades -->
   <div class="panel full-row">
-    <div class="panel-header">Recent Trades</div>
+    <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
+      <span>Closed Trades</span>
+      <span id="closedTradesSummary" style="font-size:12px; color:#64748b; font-weight:400;"></span>
+    </div>
     <div style="overflow-x:auto;">
       <table>
         <thead>
           <tr>
-            <th>Time</th>
+            <th>Closed At</th>
             <th>Strategy</th>
             <th>Market</th>
             <th>Side</th>
-            <th>Price</th>
+            <th>Entry Price</th>
             <th>Qty</th>
             <th>Status</th>
             <th>P&amp;L</th>
           </tr>
         </thead>
-        <tbody>
-          {% if recent_trades %}
-            {% for t in recent_trades %}
-            <tr>
-              <td style="white-space:nowrap; color:#64748b;">{{ t.timestamp[:19].replace("T"," ") }}</td>
-              <td>{{ t.strategy.replace("_"," ").title() }}</td>
-              <td style="max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="{{ t.question }}">{{ t.question or t.market_slug }}</td>
-              <td>
-                <span style="color:{% if 'BUY' in t.side %}#60a5fa{% else %}#f87171{% endif %}">
-                  {{ t.side.replace("ORDER_INTENT_","").replace("_"," ") }}
-                </span>
-              </td>
-              <td>${{ "%.4f"|format(t.price) }}</td>
-              <td>{{ t.quantity }}</td>
-              <td><span class="badge badge-{{ t.status }}">{{ t.status }}</span></td>
-              <td class="{% if t.pnl > 0 %}pnl-pos{% elif t.pnl < 0 %}pnl-neg{% endif %}">
-                {% if t.pnl != 0 %}{% if t.pnl > 0 %}+{% endif %}${{ "%.2f"|format(t.pnl) }}{% else %}—{% endif %}
-              </td>
-            </tr>
-            {% endfor %}
-          {% else %}
-            <tr><td colspan="8" style="text-align:center; color:#475569; padding:40px;">No trades yet. Bot is running in dry_run mode until you flip the switch in config.yaml.</td></tr>
-          {% endif %}
+        <tbody id="closedTradesBody">
+          <tr><td colspan="8" style="text-align:center; color:#475569; padding:32px;">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -742,6 +724,58 @@
     lastLogCount = 0;
     logContainer.innerHTML = '<div class="log-line log-INFO">Logs cleared.</div>';
   }
+
+  // ── Closed Trades ────────────────────────────────────────────────────────
+  async function refreshClosedTrades() {
+    try {
+      const res  = await fetch('/api/closed-trades');
+      if (!res.ok) return;
+      const data = await res.json();
+      const trades = data.trades || [];
+      const tbody  = document.getElementById('closedTradesBody');
+      const summary = document.getElementById('closedTradesSummary');
+
+      if (trades.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#475569; padding:32px;">No closed trades yet — positions close when take-profit or stop-loss triggers</td></tr>';
+        summary.textContent = '';
+        return;
+      }
+
+      const totalPnl = trades.filter(t => t.status === 'closed').reduce((s, t) => s + (t.pnl || 0), 0);
+      const wins     = trades.filter(t => t.status === 'closed' && t.pnl > 0).length;
+      const closed   = trades.filter(t => t.status === 'closed').length;
+      summary.textContent = closed > 0
+        ? `${closed} closed · ${wins}W/${closed - wins}L · Total P&L: ${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`
+        : `${trades.length} cancelled`;
+
+      tbody.innerHTML = trades.map(t => {
+        const ts      = (t.resolved_at || t.timestamp || '').slice(0, 19).replace('T', ' ');
+        const strat   = (t.strategy || '').replace(/_/g, ' ');
+        const market  = t.question || t.market_slug || '—';
+        const side    = (t.side || '').replace('ORDER_INTENT_', '').replace(/_/g, ' ');
+        const sideCol = (t.side || '').includes('BUY') ? '#60a5fa' : '#f87171';
+        const pnl     = t.pnl || 0;
+        const pnlHtml = pnl !== 0
+          ? `<span class="${pnl > 0 ? 'pnl-pos' : 'pnl-neg'}">${pnl > 0 ? '+' : ''}$${pnl.toFixed(2)}</span>`
+          : '<span style="color:#475569">—</span>';
+        const statusCls = t.status === 'closed' ? 'badge-closed' : 'badge-cancelled';
+        return `
+          <tr>
+            <td style="white-space:nowrap; color:#64748b;">${ts}</td>
+            <td style="text-transform:capitalize;">${strat}</td>
+            <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${market}">${market}</td>
+            <td><span style="color:${sideCol}; font-weight:600;">${side}</span></td>
+            <td>$${parseFloat(t.price).toFixed(4)}</td>
+            <td>${parseFloat(t.quantity).toFixed(1)}</td>
+            <td><span class="badge ${statusCls}">${t.status}</span></td>
+            <td>${pnlHtml}</td>
+          </tr>`;
+      }).join('');
+    } catch (e) { /* silent fail */ }
+  }
+
+  refreshClosedTrades();
+  setInterval(refreshClosedTrades, 15000);
 
   async function resetAllData() {
     if (!confirm('Reset ALL data?\n\nThis wipes every trade, balance snapshot, and log from the database. The bot must be stopped first.\n\nThis cannot be undone.')) return;
