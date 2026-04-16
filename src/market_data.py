@@ -89,38 +89,59 @@ class MarketData:
         return self._book_cache.get(slug)
 
     def _bbo_from_market(self, market: dict) -> dict | None:
-        """Build a BBO dict from a market's outcomePrices field."""
+        """
+        Build a BBO dict from a market object.
+        Prefers real bestBid/bestAsk fields; falls back to outcomePrices ± spread.
+        """
+        # Use actual BBO fields if present
+        best_bid = market.get("bestBid") or market.get("best_bid")
+        best_ask = market.get("bestAsk") or market.get("best_ask")
+        if best_bid is not None and best_ask is not None:
+            try:
+                bid = float(best_bid)
+                ask = float(best_ask)
+                if 0 < bid < ask < 1:
+                    return {
+                        "bid": {"price": bid},
+                        "ask": {"price": ask},
+                        "mid": round((bid + ask) / 2, 4),
+                    }
+            except (TypeError, ValueError):
+                pass
+
+        # Fall back to outcomePrices (YES price = prices[0])
         prices = self.get_outcome_prices(market)
         if not prices:
             return None
-        if len(prices) >= 2:
-            # Binary: prices[0]=YES price, prices[1]=NO price
-            # YES bid/ask approximation from outcomePrices
-            yes_price = prices[0]
-            return {
-                "bid": {"price": max(0.01, yes_price - 0.01)},
-                "ask": {"price": min(0.99, yes_price + 0.01)},
-                "mid": yes_price,
-            }
-        elif len(prices) == 1:
-            p = prices[0]
-            return {
-                "bid": {"price": max(0.01, p - 0.01)},
-                "ask": {"price": min(0.99, p + 0.01)},
-                "mid": p,
-            }
-        return None
+        yes_price = prices[0]
+        # Use a 2-cent spread — aggressive enough for taker fills on near-certainty
+        spread = 0.01
+        return {
+            "bid": {"price": max(0.01, yes_price - spread)},
+            "ask": {"price": min(0.99, yes_price + spread)},
+            "mid": yes_price,
+        }
 
     async def get_markets_by_volume(self, min_volume: float, top_n: int = 10) -> list:
         markets = await self.get_markets()
-        # No volume field exists — return all active markets, sorted by outcome count
         open_markets = [m for m in markets if not self._is_closed(m)]
 
-        msg = f"Volume filter: {len(open_markets)} open markets (no volume field — using all), returning top {min(top_n, len(open_markets))}"
+        # Sort by volume descending (uses real volume24hr/volumeNum fields)
+        open_markets.sort(key=lambda m: self._get_volume(m), reverse=True)
+
+        # Apply minimum volume filter if any markets have real volume data
+        if min_volume > 0:
+            has_volume = [m for m in open_markets if self._get_volume(m) >= min_volume]
+            if has_volume:
+                open_markets = has_volume
+
+        result = open_markets[:top_n]
+        top_vols = [(self.get_question(m)[:30], round(self._get_volume(m))) for m in result[:3]]
+        msg = f"Volume filter: {len(open_markets)} open markets, top {len(result)} — top3={top_vols}"
         logger.info(msg)
         await db.log_to_db("INFO", msg)
 
-        return open_markets[:top_n]
+        return result
 
     async def get_markets_resolving_soon(self, max_hours: float, min_volume: float = 0) -> list:
         markets = await self.get_markets()
@@ -221,15 +242,17 @@ class MarketData:
         return False
 
     def _get_volume(self, market: dict) -> float:
-        for key in ("volume24h", "volume", "volumeNum", "dailyVolume",
-                    "volume_24h", "daily_volume", "liquidity"):
+        for key in ("volume24hr", "volume1wk", "volumeNum", "volume",
+                    "volume24h", "daily_volume", "liquidity", "liquidityNum"):
             val = market.get(key)
             if val is not None:
                 try:
-                    return float(val)
+                    v = float(val)
+                    if v > 0:
+                        return v
                 except (ValueError, TypeError):
                     pass
-        return 1.0  # Default — no volume field on Polymarket.us
+        return 0.0
 
     def _hours_to_resolution(self, market: dict) -> float | None:
         for key in ("endDate", "closeTime", "resolutionTime", "expirationDate",

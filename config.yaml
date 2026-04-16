@@ -11,7 +11,7 @@ strategies:
 
   near_certainty:
     enabled: true
-    capital_pct: 20
+    capital_pct: 25
     min_price: 0.93
     max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
     min_market_volume: 0
@@ -20,7 +20,7 @@ strategies:
 
   inverted_near_certainty:           # Buy NO on markets where YES < 7 cents
     enabled: true
-    capital_pct: 20
+    capital_pct: 25
     max_yes_price: 0.07              # YES must be priced below $0.07
     max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
     min_market_volume: 0
@@ -30,11 +30,11 @@ strategies:
   market_making:
     enabled: true
     capital_pct: 30
-    min_daily_volume: 0              # No volume floor — will refine once we see field names
+    min_daily_volume: 0              # sorts by volume, makes markets on highest-vol first
     spread_pct: 0.02
-    max_open_orders_per_market: 4
-    order_size_usdc: 100
-    num_markets: 20
+    max_open_orders_per_market: 2
+    order_size_usdc: 50
+    num_markets: 10
     refresh_interval_seconds: 60
 
   logical_arb:
