@@ -84,7 +84,9 @@ class WhaleTrackerStrategy(BaseStrategy):
             except (TypeError, ValueError):
                 continue
 
-            if mid <= 0.01 or mid >= 0.99:
+            # Only trade in the uncertain zone — near-certain markets have
+            # such wide bid/ask spreads that taker prices are terrible value
+            if mid <= 0.10 or mid >= 0.90:
                 continue
 
             # Record snapshot
@@ -118,23 +120,31 @@ class WhaleTrackerStrategy(BaseStrategy):
             # Determine direction — follow the momentum
             if move > 0:
                 # Price surged — buy YES (long)
-                direction = "up"
-                intent    = "ORDER_INTENT_BUY_LONG"
-                ask = float(bbo.get("ask", {}).get("price", min(mid + 0.02, 0.99)))
-                taker_price = min(round(ask + 0.02, 4), 0.99)
-                win_prob    = min(mid + abs(move) / 2, 0.95)   # assume move continues partway
-                net_ret_pct = fees.net_profit_pct_near_certainty(mid) / 100
+                # Use mid as fair value basis, pay a small taker premium above it.
+                # Cap at 0.88 so there's always meaningful upside room.
+                direction   = "up"
+                intent      = "ORDER_INTENT_BUY_LONG"
+                taker_price = min(round(mid + 0.03, 4), 0.88)
+                # Expected exit: momentum carries price halfway to our win_prob estimate
+                win_prob    = min(mid + abs(move) / 2, 0.88)
+                # Net return if we exit at win_prob vs what we paid
+                net_ret_pct = max((win_prob - taker_price) / taker_price, 0.0)
             else:
                 # Price crashed — buy NO (short)
-                direction = "down"
-                intent    = "ORDER_INTENT_BUY_SHORT"
-                bid = float(bbo.get("bid", {}).get("price", max(mid - 0.02, 0.01)))
-                no_price    = round(1.0 - bid, 4)
-                taker_price = min(round(no_price + 0.02, 4), 0.99)
-                win_prob    = min(1.0 - mid + abs(move) / 2, 0.95)
-                net_ret_pct = fees.net_profit_pct_near_certainty(1.0 - mid) / 100
+                # Use YES mid to compute fair NO price (NOT YES bid, which causes massive overpay).
+                # e.g. YES mid=0.04 → NO fair=0.96, taker=0.97, capped at 0.88.
+                direction   = "down"
+                intent      = "ORDER_INTENT_BUY_SHORT"
+                no_fair     = round(1.0 - mid, 4)
+                taker_price = min(round(no_fair + 0.03, 4), 0.88)
+                win_prob    = min(1.0 - mid + abs(move) / 2, 0.88)
+                net_ret_pct = max((win_prob - taker_price) / taker_price, 0.0)
 
             if net_ret_pct < min_net_return / 100:
+                self.log(
+                    f"Skipping {direction.upper()} signal on '{question[:35]}' — "
+                    f"net return {net_ret_pct:.2%} below minimum {min_net_return:.1f}%"
+                )
                 continue
 
             # Kelly sizing
