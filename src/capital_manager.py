@@ -56,7 +56,7 @@ class CapitalManager:
         win_prob: float,
         net_return_pct: float,
         kelly_fraction: float = 0.25,
-        min_size: float = 10.0,
+        min_size: float = 1.0,
         max_size: float = 300.0,
     ) -> float:
         """

@@ -8,8 +8,8 @@ capital:
   reserve_pct: 10
 
 circuit_breaker:
-  max_daily_loss_usdc: 50        # Stop all trading if we lose more than $50 in a single day
-  max_drawdown_pct: 0.20         # Stop if we're down more than 20% from session-start balance
+  max_daily_loss_usdc: 4         # $4 max daily loss (scaled for $12 test balance — raise when funded)
+  max_drawdown_pct: 0.20         # Stop if down more than 20% from session-start balance (~$2.40 on $12)
   max_consecutive_losses: 5      # Stop after 5 straight losing trades
   max_orders_per_minute: 15      # Runaway loop guard — halt if >15 orders placed in 60s
 
@@ -21,7 +21,7 @@ strategies:
     min_price: 0.93
     max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
     min_market_volume: 0
-    order_size_usdc: 50              # Fallback if Kelly is off
+    order_size_usdc: 2               # Scaled for $12 balance (raise to 50 when funded)
     min_net_return_pct: 1.0
     use_kelly_sizing: true           # Size by edge magnitude (Kelly criterion)
     kelly_fraction: 0.25             # Quarter-Kelly for safety
@@ -32,7 +32,7 @@ strategies:
     max_yes_price: 0.07              # YES must be priced below $0.07
     max_hours_to_resolution: 8760    # Scan all markets (up to 1yr out)
     min_market_volume: 0
-    order_size_usdc: 50
+    order_size_usdc: 2               # Scaled for $12 balance
     min_net_return_pct: 1.0
     use_kelly_sizing: true
     kelly_fraction: 0.25
@@ -43,21 +43,21 @@ strategies:
     min_daily_volume: 0              # sorts by volume, makes markets on highest-vol first
     spread_pct: 0.02
     max_open_orders_per_market: 2
-    order_size_usdc: 50
-    num_markets: 10
+    order_size_usdc: 2               # Scaled for $12 balance
+    num_markets: 3                   # Fewer markets while balance is tiny
     refresh_interval_seconds: 60
 
   logical_arb:
     enabled: true
     capital_pct: 15
     min_arb_pct: 0.03
-    order_size_usdc: 100
+    order_size_usdc: 2               # Scaled for $12 balance
     min_outcomes: 2
 
   ai_trader:
     enabled: true
     capital_pct: 15                  # Reduced — whale_tracker is a new alpha source
-    order_size_usdc: 50              # Fallback if Kelly is off
+    order_size_usdc: 2               # Scaled for $12 balance (raise to 50 when funded)
     min_edge_pct: 0.12               # Need ≥12% gap between AI estimate and market price
     min_market_price: 0.10
     max_market_price: 0.90
@@ -82,7 +82,7 @@ strategies:
   whale_tracker:
     enabled: true
     capital_pct: 15                  # 15% of portfolio for momentum trades
-    order_size_usdc: 50
+    order_size_usdc: 2               # Scaled for $12 balance
     min_move_pct: 0.05               # 5% price move triggers entry
     lookback_ticks: 4                # Compare to 4 ticks ago (~2 min at 30s/tick)
     top_markets: 30                  # Monitor top 30 markets by volume

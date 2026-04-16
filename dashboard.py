@@ -86,8 +86,22 @@ async def run_bot_loop():
 
     market_data = MarketData(client)
     order_manager = OrderManager(client, max_concurrent=bot_cfg.get("max_concurrent_orders", 20))
+
+    # Fetch real balance at startup so capital manager is accurate from tick 1
+    startup_balance = 1000.0
+    try:
+        balance_data = await client.get_balance()
+        for key in ("availableBalance", "balance", "usdc", "availableUsdc", "cashBalance"):
+            val = balance_data.get(key)
+            if val is not None:
+                startup_balance = float(val)
+                break
+        logger.info(f"Startup balance: ${startup_balance:.2f} USDC")
+    except Exception as e:
+        logger.warning(f"Could not fetch startup balance, defaulting to $1000: {e}")
+
     capital = CapitalManager(
-        total_usdc=1000.0,
+        total_usdc=startup_balance,
         strategy_config=config.get("strategies", {}),
         reserve_pct=config.get("capital", {}).get("reserve_pct", 10),
     )
