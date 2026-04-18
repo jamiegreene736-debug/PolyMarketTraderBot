@@ -375,6 +375,67 @@ async def api_stats(_=Depends(verify_password)):
     return stats
 
 
+@app.get("/api/diagnose")
+async def api_diagnose(_=Depends(verify_password)):
+    """
+    Live diagnostic: queries the CLOB to find the correct proxy wallet address
+    and which signature_type has a non-zero balance.
+    Hit this in your browser to debug auth/balance issues.
+    """
+    import os as _os
+    from src.client import PolymarketClient, CLOB_HOST, CHAIN_ID
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
+
+    api_key        = _os.getenv("POLY_API_KEY", "").strip()
+    api_secret     = _os.getenv("POLY_API_SECRET", "").strip()
+    api_passphrase = _os.getenv("POLY_API_PASSPHRASE", "").strip()
+    private_key    = _os.getenv("POLY_PRIVATE_KEY", "").strip()
+
+    results = {}
+
+    try:
+        creds = ApiCreds(
+            api_key=api_key, api_secret=api_secret, api_passphrase=api_passphrase
+        )
+        clob = await asyncio.to_thread(
+            ClobClient, CLOB_HOST, chain_id=CHAIN_ID, key=private_key, creds=creds
+        )
+        results["signer_address"] = clob.get_address()
+
+        # API keys — shows which wallet/address the key is associated with
+        try:
+            results["api_keys"] = await asyncio.to_thread(clob.get_api_keys)
+        except Exception as e:
+            results["api_keys_error"] = str(e)
+
+        # Balance for each sig type
+        for stype, label in [(0, "EOA"), (1, "POLY_PROXY"), (2, "POLY_GNOSIS_SAFE")]:
+            try:
+                bal = await asyncio.to_thread(
+                    clob.get_balance_allowance,
+                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=stype),
+                )
+                results[f"balance_sig{stype}_{label}"] = bal
+            except Exception as e:
+                results[f"balance_sig{stype}_{label}_error"] = str(e)
+
+        # Also try update_balance_allowance with sig_type=1 (may reveal proxy address in response)
+        try:
+            upd = await asyncio.to_thread(
+                clob.update_balance_allowance,
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL, signature_type=1),
+            )
+            results["update_allowance_sig1_response"] = upd
+        except Exception as e:
+            results["update_allowance_sig1_error"] = str(e)
+
+    except Exception as e:
+        results["clob_connect_error"] = str(e)
+
+    return results
+
+
 @app.get("/api/status")
 async def api_status(_=Depends(verify_password)):
     state = dict(_bot_state)
