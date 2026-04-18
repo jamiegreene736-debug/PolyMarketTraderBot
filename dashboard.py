@@ -97,10 +97,11 @@ async def run_bot_loop():
     )
     await client.connect()
 
-    # Set ERC-20 spending approvals for the CLOB exchange contracts so the
-    # signer address can place orders once USDC arrives.  Safe to call every
-    # startup — the CLOB ignores the call if approvals are already sufficient.
-    if not bot_cfg.get("dry_run", False):
+    # Set ERC-20 spending approvals for the CLOB exchange contracts.
+    # Skip in proxy-wallet mode: the proxy wallet's allowances are already
+    # managed by Polymarket's contracts — calling this would attempt to approve
+    # from the EOA (which has $0) and generate misleading warnings.
+    if not bot_cfg.get("dry_run", False) and not funder_address:
         await client.setup_allowances()
 
     market_data = MarketData(client)

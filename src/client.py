@@ -71,12 +71,28 @@ class PolymarketClient:
             api_secret     = self.api_secret,
             api_passphrase = self.api_passphrase,
         )
+
+        # If a proxy/funder wallet address is provided, use POLY_PROXY signing
+        # (signature_type=1).  This tells the CLOB to check the proxy wallet's
+        # USDC balance rather than the raw EOA signer's balance, so funds can
+        # stay in the user's Polymarket account without being moved to the EOA.
+        sig_type = None
+        funder   = None
+        if self.funder_address:
+            sig_type = 1          # POLY_PROXY
+            funder   = self.funder_address
+            logger.info(
+                f"CLOB proxy-wallet mode: funder={funder} sig_type={sig_type}"
+            )
+
         self._client = await asyncio.to_thread(
             ClobClient,
             CLOB_HOST,
-            chain_id = CHAIN_ID,
-            key      = self.private_key,
-            creds    = creds,
+            chain_id       = CHAIN_ID,
+            key            = self.private_key,
+            creds          = creds,
+            signature_type = sig_type,
+            funder         = funder,
         )
         logger.info(f"Polymarket CLOB client connected (dry_run={self.dry_run})")
 
