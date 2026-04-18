@@ -96,6 +96,28 @@ class PolymarketClient:
         )
         logger.info(f"Polymarket CLOB client connected (dry_run={self.dry_run})")
 
+        # ── Account diagnostics (logged once at startup) ──────────────────────
+        # Helps us understand exactly what the CLOB sees for this account:
+        # which wallets/keys are registered, and where the balance actually lives.
+        try:
+            api_keys_resp = await asyncio.to_thread(self._client.get_api_keys)
+            logger.info(f"CLOB get_api_keys: {api_keys_resp}")
+        except Exception as e:
+            logger.warning(f"CLOB get_api_keys failed: {e}")
+
+        for stype, label in [(0, "EOA"), (1, "POLY_PROXY"), (2, "POLY_GNOSIS_SAFE")]:
+            try:
+                bal = await asyncio.to_thread(
+                    self._client.get_balance_allowance,
+                    BalanceAllowanceParams(
+                        asset_type=AssetType.COLLATERAL,
+                        signature_type=stype,
+                    ),
+                )
+                logger.info(f"CLOB balance sig_type={stype} ({label}): {bal}")
+            except Exception as e:
+                logger.warning(f"CLOB balance sig_type={stype} ({label}) failed: {e}")
+
     async def setup_allowances(self):
         """
         Approve the CLOB exchange contracts to spend USDC and CTF tokens on behalf
