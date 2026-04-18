@@ -38,11 +38,16 @@ class NewsClient:
     """Fetches relevant headlines from NewsAPI for a given market question."""
 
     BASE_URL = "https://newsapi.org/v2/everything"
+    TOP_HEADLINES_URL = "https://newsapi.org/v2/top-headlines"
 
     def __init__(self, api_key: str):
         self.api_key = api_key
         self._cache: dict[str, tuple[float, list[str]]] = {}
         self._ttl = 3600  # cache headlines for 1 hour
+        # Separate cache for top headlines (per-country) with a short TTL so
+        # news_catalyst can react quickly to breaking stories.
+        self._top_cache: dict[str, tuple[float, list[dict]]] = {}
+        self._top_ttl = 60
 
     async def get_headlines(self, question: str, max_articles: int = 5) -> list[str]:
         """
@@ -92,4 +97,57 @@ class NewsClient:
 
         except Exception as e:
             logger.debug(f"NewsAPI error for '{query}': {e}")
+            return []
+
+    async def get_top_headlines(
+        self, country: str = "us", max_articles: int = 20
+    ) -> list[dict]:
+        """
+        Return recent top headlines as structured dicts:
+          {"title": str, "source": str, "published": str, "url": str}
+
+        Used by news_catalyst to find potential market-resolving news.
+        Returns [] on any error — this is best-effort alpha, not critical path.
+        """
+        if not self.api_key:
+            return []
+
+        now = asyncio.get_event_loop().time()
+        cached = self._top_cache.get(country)
+        if cached and (now - cached[0]) < self._top_ttl:
+            return cached[1]
+
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                resp = await client.get(
+                    self.TOP_HEADLINES_URL,
+                    params={
+                        "country": country,
+                        "apiKey": self.api_key,
+                        "pageSize": max_articles,
+                    },
+                )
+                if resp.status_code == 429:
+                    logger.warning("NewsAPI top-headlines rate limit hit")
+                    return []
+                resp.raise_for_status()
+                data = resp.json()
+
+                headlines: list[dict] = []
+                for article in data.get("articles", [])[:max_articles]:
+                    title = article.get("title", "")
+                    if not title or title == "[Removed]":
+                        continue
+                    headlines.append({
+                        "title":     title,
+                        "source":    article.get("source", {}).get("name", "Unknown"),
+                        "published": (article.get("publishedAt") or "")[:19],
+                        "url":       article.get("url", ""),
+                    })
+
+                self._top_cache[country] = (now, headlines)
+                return headlines
+
+        except Exception as e:
+            logger.debug(f"NewsAPI top-headlines error: {e}")
             return []

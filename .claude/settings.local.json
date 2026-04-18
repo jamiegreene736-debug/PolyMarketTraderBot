@@ -10,7 +10,11 @@
       "WebFetch(domain:agentbets.ai)",
       "WebFetch(domain:docs.polymarket.us)",
       "WebFetch(domain:www.polymarketexchange.com)",
-      "WebFetch(domain:pm.wiki)"
+      "WebFetch(domain:pm.wiki)",
+      "Bash(pip show:*)",
+      "Bash(python3 -m pip show polymarket-us)",
+      "Bash(pip3 show:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

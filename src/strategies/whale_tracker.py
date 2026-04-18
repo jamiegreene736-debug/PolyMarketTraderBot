@@ -70,12 +70,15 @@ class WhaleTrackerStrategy(BaseStrategy):
         signals: list[tuple[str, str, float, float, float]] = []
         # (slug, question, mid, move_pct, direction_sign)
 
-        for market in markets:
-            slug = self.market_data.get_slug(market)
-            if not slug:
-                continue
+        # Parallel BBO fetch for all monitored markets — avoids ~30 sequential
+        # awaits per tick which became a real bottleneck at the new 15s tick.
+        market_slugs = [(m, self.market_data.get_slug(m)) for m in markets]
+        market_slugs = [(m, s) for m, s in market_slugs if s]
+        bbos = await asyncio.gather(
+            *[self.market_data.get_bbo(s) for _, s in market_slugs]
+        )
 
-            bbo = await self.market_data.get_bbo(slug)
+        for (market, slug), bbo in zip(market_slugs, bbos):
             if not bbo:
                 continue
 
@@ -154,7 +157,7 @@ class WhaleTrackerStrategy(BaseStrategy):
                     win_prob=win_prob,
                     net_return_pct=max(net_ret_pct, 0.005),
                     kelly_fraction=kelly_frac,
-                    min_size=1.0,
+                    min_size=fallback_size,   # always at least order_size_usdc so we clear 5-share min
                     max_size=fallback_size,
                 )
             else:

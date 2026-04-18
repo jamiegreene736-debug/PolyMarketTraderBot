@@ -173,19 +173,25 @@ class AITradingStrategy(BaseStrategy):
             self.log("No markets available for AI analysis")
             return
 
-        candidates = []
+        # Pre-filter to markets worth fetching BBOs for, then parallel-fetch.
+        prefiltered = []
         for m in markets:
             slug = self.market_data.get_slug(m)
             if not slug:
                 continue
             if self.order_manager.get_market_order_count(slug) > 0:
                 continue
-
             cached = self._estimate_cache.get(slug)
             if cached and (now - cached[0]) < self._cache_ttl:
                 continue
+            prefiltered.append((m, slug))
 
-            bbo = await self.market_data.get_bbo(slug)
+        bbos = await asyncio.gather(
+            *[self.market_data.get_bbo(slug) for _, slug in prefiltered]
+        )
+
+        candidates = []
+        for (m, slug), bbo in zip(prefiltered, bbos):
             if not bbo:
                 continue
             try:
@@ -194,7 +200,6 @@ class AITradingStrategy(BaseStrategy):
                 continue
             if not (min_price <= mid <= max_price):
                 continue
-
             candidates.append((m, mid))
 
         if not candidates:
@@ -291,7 +296,7 @@ class AITradingStrategy(BaseStrategy):
                 order_size = self.capital_manager.kelly_size(
                     self.name, win_prob, net_ret,
                     kelly_fraction=kelly_frac,
-                    min_size=1.0,
+                    min_size=fallback_size,   # always at least order_size_usdc so we clear 5-share min
                     max_size=fallback_size,
                 )
             else:
@@ -410,6 +415,7 @@ class AITradingStrategy(BaseStrategy):
             model=model,
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
+            timeout=20.0,                 # hard cap — prevents ai_trader hangs
         )
         raw = message.content[0].text.strip()
         if "```" in raw:
@@ -454,6 +460,7 @@ class AITradingStrategy(BaseStrategy):
             max_tokens=300,
             temperature=0.2,
             messages=[{"role": "user", "content": prompt}],
+            timeout=20.0,                 # hard cap — prevents ai_trader hangs
         )
         raw = response.choices[0].message.content.strip()
         if "```" in raw:

@@ -21,6 +21,7 @@ class MarketData:
     def __init__(self, client: PolymarketClient):
         self.client = client
         self._markets_cache: list = []
+        self._market_by_slug: dict = {}          # slug → market, rebuilt on each fetch
         self._markets_fetched_at: float = 0
         self._book_cache: dict = {}
         self._book_fetched_at: dict = {}
@@ -38,6 +39,13 @@ class MarketData:
                     m for m in raw
                     if not self._is_closed(m)
                 ]
+                # Rebuild slug→market index so get_bbo() is O(1) instead of
+                # scanning the whole list on every call (kills quadratic blowup
+                # when strategies fetch BBO for hundreds of markets per tick).
+                self._market_by_slug = {
+                    slug: m for m in self._markets_cache
+                    if (slug := self.get_slug(m))
+                }
                 self._markets_fetched_at = now
 
                 msg = f"Fetched {len(raw)} markets total, {len(self._markets_cache)} active"
@@ -71,10 +79,10 @@ class MarketData:
         This method wraps that lookup in the same interface the strategies expect.
         Falls back to the API bbo endpoint if the market isn't cached.
         """
-        # First try to find the market in cache and read outcomePrices directly
-        for m in self._markets_cache:
-            if self.get_slug(m) == slug:
-                return self._bbo_from_market(m)
+        # O(1) cache lookup via slug index — built when markets are fetched.
+        cached = self._market_by_slug.get(slug)
+        if cached is not None:
+            return self._bbo_from_market(cached)
 
         # Fall back to BBO API endpoint
         now = asyncio.get_event_loop().time()
@@ -240,6 +248,26 @@ class MarketData:
         if hours is not None and hours <= 0:
             return True
         return False
+
+    def get_market_liquidity(self, slug: str) -> float:
+        """
+        Return the liquidity (sum of resting order-book depth, in USDC) for a
+        market. Returns 0.0 if the market isn't cached or has no liquidity field.
+        Used as a cheap pre-trade depth gate.
+        """
+        m = self._market_by_slug.get(slug)
+        if not m:
+            return 0.0
+        for key in ("liquidityNum", "liquidity", "liquidityUSDC"):
+            val = m.get(key)
+            if val is not None:
+                try:
+                    v = float(val)
+                    if v >= 0:
+                        return v
+                except (TypeError, ValueError):
+                    pass
+        return 0.0
 
     def _get_volume(self, market: dict) -> float:
         for key in ("volume24hr", "volume1wk", "volumeNum", "volume",

@@ -5,15 +5,24 @@ from src.client import PolymarketClient
 from src import database as db
 
 
+# Polymarket CLOB enforces a 5-share minimum per order. Orders below this
+# are silently rejected by the exchange — we catch them locally and log
+# a clear warning so the user can size up or fund more capital.
+MIN_ORDER_SHARES = 5
+
+
 class OrderManager:
     """
     Manages all order placement, tracking, deduplication, and cancellation.
     Prevents duplicate orders and enforces rate limiting.
     """
 
-    def __init__(self, client: PolymarketClient, max_concurrent: int = 20):
+    def __init__(self, client: PolymarketClient, max_concurrent: int = 20,
+                 market_data=None, min_liquidity_multiple: float = 3.0):
         self.client = client
         self.max_concurrent = max_concurrent
+        self.market_data = market_data               # optional — used for liquidity gate
+        self.min_liquidity_multiple = min_liquidity_multiple
         self._open_orders: dict[str, dict] = {}     # order_id -> order info
         self._market_orders: dict[str, list] = {}   # market_slug -> [order_ids]
         self._lock = asyncio.Lock()
@@ -28,8 +37,37 @@ class OrderManager:
                 logger.warning(f"Max concurrent orders ({self.max_concurrent}) reached, skipping")
                 return None
 
-            if self._is_duplicate(market_slug, intent, price):
+            if self._is_duplicate(market_slug, intent, price, strategy):
                 logger.debug(f"Duplicate order skipped: {intent} @ {price} on {market_slug}")
+                return None
+
+        # Polymarket minimum order size guard. Reject before hitting the API
+        # rather than letting the exchange silently drop the order.
+        if quantity < MIN_ORDER_SHARES:
+            notional_needed = MIN_ORDER_SHARES * price
+            msg = (f"[order] SKIP {intent} on {market_slug}: qty={quantity:.2f} shares "
+                   f"< Polymarket minimum ({MIN_ORDER_SHARES}). At price ${price:.4f} "
+                   f"you need ${notional_needed:.2f} notional — raise order_size_usdc "
+                   f"or fund more capital.")
+            logger.warning(msg)
+            await db.log_to_db("WARNING", msg)
+            return None
+
+        # Liquidity gate: skip thin markets where we can't get in/out without
+        # moving price against ourselves. Uses the market's `liquidity` field
+        # as a proxy for total book depth.
+        if self.market_data is not None and self.min_liquidity_multiple > 0:
+            notional = quantity * price
+            liquidity = self.market_data.get_market_liquidity(market_slug)
+            required = notional * self.min_liquidity_multiple
+            # Skip the check if the market has no liquidity metadata at all
+            # (some Polymarket markets don't expose it, and we'd rather trade).
+            if liquidity > 0 and liquidity < required:
+                msg = (f"[order] SKIP {intent} on {market_slug}: thin market "
+                       f"(liquidity=${liquidity:.0f} < {self.min_liquidity_multiple}× "
+                       f"notional ${notional:.2f} = ${required:.2f}).")
+                logger.warning(msg)
+                await db.log_to_db("WARNING", msg)
                 return None
 
         await self._rate_limit_wait()
@@ -238,13 +276,33 @@ class OrderManager:
     def get_total_open_orders(self) -> int:
         return len(self._open_orders)
 
+    def clear(self):
+        """Wipe all in-memory position state. Called by Reset Data from the dashboard."""
+        self._open_orders.clear()
+        self._market_orders.clear()
+
     # ── Helpers ──────────────────────────────────────────────────────────────
 
-    def _is_duplicate(self, market_slug: str, intent: str, price: float) -> bool:
+    def _is_duplicate(self, market_slug: str, intent: str, price: float,
+                      strategy: str) -> bool:
+        """
+        Dedup logic:
+          - Within a single strategy: block if same slug + same intent + price within 1¢
+            (preserves legacy behaviour — lets market_making re-quote at new prices).
+          - Across different strategies: block ANY same slug + same intent, regardless
+            of price. Prevents pile-on where near_certainty + whale_tracker + ai_trader
+            all buy the same market on the same tick and triple the intended exposure.
+        """
         for order in self._open_orders.values():
-            if (order["market_slug"] == market_slug
-                    and order["intent"] == intent
-                    and abs(order["price"] - price) < 0.01):
+            if order["market_slug"] != market_slug:
+                continue
+            if order["intent"] != intent:
+                continue
+            if order.get("strategy") == strategy:
+                if abs(order["price"] - price) < 0.01:
+                    return True
+            else:
+                # Different strategy — block same-slug-same-side pile-on outright.
                 return True
         return False
 

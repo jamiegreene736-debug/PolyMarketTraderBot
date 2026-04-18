@@ -326,29 +326,29 @@
   <div class="stats-grid">
     <div class="stat-card">
       <div class="label">Total P&amp;L</div>
-      <div class="value {% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">
+      <div id="statTotalPnl" class="value {% if total_pnl >= 0 %}positive{% else %}negative{% endif %}">
         {% if total_pnl >= 0 %}+{% endif %}${{ "%.2f"|format(total_pnl) }}
       </div>
       <div class="sub">Realized</div>
     </div>
     <div class="stat-card">
       <div class="label">Win Rate</div>
-      <div class="value {% if win_rate >= 50 %}positive{% else %}negative{% endif %}">{{ win_rate }}%</div>
-      <div class="sub">{{ wins }} / {{ total_closed }} trades</div>
+      <div id="statWinRate" class="value {% if win_rate >= 50 %}positive{% else %}negative{% endif %}">{{ win_rate }}%</div>
+      <div id="statWinRateSub" class="sub">{{ wins }} / {{ total_closed }} trades</div>
     </div>
     <div class="stat-card">
       <div class="label">Open Positions</div>
-      <div class="value">{{ open_positions }}</div>
+      <div id="statOpenPositions" class="value">{{ open_positions }}</div>
       <div class="sub">Active orders</div>
     </div>
     <div class="stat-card">
       <div class="label">Total Trades</div>
-      <div class="value">{{ total_trades }}</div>
+      <div id="statTotalTrades" class="value">{{ total_trades }}</div>
       <div class="sub">All time</div>
     </div>
     <div class="stat-card">
       <div class="label">Trades Today</div>
-      <div class="value">{{ trades_today }}</div>
+      <div id="statTradesToday" class="value">{{ trades_today }}</div>
       <div class="sub">UTC day</div>
     </div>
   </div>
@@ -711,12 +711,53 @@
     }
   }
 
-  async function refreshLogs() {
+  // ── Stats Cards ─────────────────────────────────────────────────────────
+  async function refreshStats() {
     try {
       const res  = await fetch('/api/stats');
-      const data = await res.json();
-      renderLogs(data.recent_logs || []);
+      if (!res.ok) return;
+      const d = await res.json();
+
+      // Total P&L
+      const pnlEl = document.getElementById('statTotalPnl');
+      if (pnlEl) {
+        const pnl = d.total_pnl || 0;
+        pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
+        pnlEl.className = 'value ' + (pnl >= 0 ? 'positive' : 'negative');
+      }
+
+      // Win Rate
+      const wrEl  = document.getElementById('statWinRate');
+      const wrSub = document.getElementById('statWinRateSub');
+      if (wrEl) {
+        const wr = d.win_rate || 0;
+        wrEl.textContent = wr + '%';
+        wrEl.className = 'value ' + (wr >= 50 ? 'positive' : 'negative');
+      }
+      if (wrSub) {
+        wrSub.textContent = (d.wins || 0) + ' / ' + (d.total_closed || 0) + ' trades';
+      }
+
+      // Open Positions
+      const opEl = document.getElementById('statOpenPositions');
+      if (opEl) opEl.textContent = d.open_positions ?? 0;
+
+      // Total Trades
+      const ttEl = document.getElementById('statTotalTrades');
+      if (ttEl) ttEl.textContent = d.total_trades ?? 0;
+
+      // Trades Today
+      const tdEl = document.getElementById('statTradesToday');
+      if (tdEl) tdEl.textContent = d.trades_today ?? 0;
+
+      // Also push recent logs from the same fetch
+      renderLogs(d.recent_logs || []);
     } catch (e) { /* silent fail */ }
+  }
+
+  async function refreshLogs() {
+    // refreshStats() now handles logs too — kept for compatibility
+    await refreshStats();
   }
 
   async function clearLogs() {
@@ -785,15 +826,16 @@
       lastLogCount = 0;
       logContainer.innerHTML = '<div class="log-line log-INFO">Data reset.</div>';
       refreshPositions();
+      refreshStats();
     } else {
       const err = await res.json().catch(() => ({}));
       showToast(err.detail || 'Reset failed', 'error');
     }
   }
 
-  // Poll logs every 3 seconds
-  refreshLogs();
-  setInterval(refreshLogs, 3000);
+  // Poll stats + logs every 5 seconds (single fetch covers both)
+  refreshStats();
+  setInterval(refreshStats, 5000);
 </script>
 </body>
 </html>

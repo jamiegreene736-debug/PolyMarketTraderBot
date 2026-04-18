@@ -1,3 +1,4 @@
+import asyncio
 from src.strategies.base import BaseStrategy
 from src import fees
 
@@ -44,14 +45,18 @@ class NearCertaintyStrategy(BaseStrategy):
         self.log(f"Scanning {len(markets)} markets for near-certainty YES (price>=${min_price})")
         entered = 0
 
-        for market in markets:
-            slug     = self.market_data.get_slug(market)
+        # Batch-fetch all BBOs in parallel up front. Previously this loop did
+        # ~500 sequential awaits per tick, which could take longer than the
+        # poll interval itself on slow ticks.
+        market_slugs = [(m, self.market_data.get_slug(m)) for m in markets]
+        market_slugs = [(m, s) for m, s in market_slugs if s]
+        bbos = await asyncio.gather(
+            *[self.market_data.get_bbo(s) for _, s in market_slugs]
+        )
+
+        for (market, slug), bbo in zip(market_slugs, bbos):
             question = self.market_data.get_question(market)
 
-            if not slug:
-                continue
-
-            bbo = await self.market_data.get_bbo(slug)
             if not bbo:
                 continue
 
@@ -90,7 +95,7 @@ class NearCertaintyStrategy(BaseStrategy):
                     win_prob=mid,
                     net_return_pct=net_profit_pct / 100,
                     kelly_fraction=kelly_frac,
-                    min_size=1.0,
+                    min_size=fallback_size,   # always at least order_size_usdc so we clear 5-share min
                     max_size=fallback_size,
                 )
             else:

@@ -1,3 +1,4 @@
+import asyncio
 from loguru import logger
 from src.strategies.base import BaseStrategy
 from src import fees
@@ -33,22 +34,35 @@ class LogicalArbStrategy(BaseStrategy):
 
         self.log(f"Scanning {len(event_groups)} event groups for logical arbitrage")
 
-        for event_id, markets in event_groups.items():
-            if len(markets) < min_outcomes:
-                continue
+        # Collect every (event_id, market, slug) tuple that needs a BBO, then
+        # fetch them all concurrently in one gather call instead of nested
+        # sequential awaits across hundreds of markets.
+        eligible_groups = {
+            eid: ms for eid, ms in event_groups.items() if len(ms) >= min_outcomes
+        }
+        fetch_plan = []
+        for event_id, markets in eligible_groups.items():
+            for market in markets:
+                slug = self.market_data.get_slug(market)
+                if slug:
+                    fetch_plan.append((event_id, market, slug))
 
-            # Fetch ask prices for all outcomes
+        bbos = await asyncio.gather(
+            *[self.market_data.get_bbo(slug) for _, _, slug in fetch_plan]
+        )
+
+        # Re-bucket results by event_id
+        by_event: dict[str, list] = {}
+        for (event_id, market, slug), bbo in zip(fetch_plan, bbos):
+            by_event.setdefault(event_id, []).append((market, slug, bbo))
+
+        for event_id, entries in by_event.items():
             slugs = []
             ask_prices = []
             questions = []
 
-            for market in markets:
-                slug = self.market_data.get_slug(market)
+            for market, slug, bbo in entries:
                 question = self.market_data.get_question(market)
-                if not slug:
-                    continue
-
-                bbo = await self.market_data.get_bbo(slug)
                 if not bbo:
                     continue
 

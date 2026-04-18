@@ -1,14 +1,15 @@
 bot:
-  poll_interval_seconds: 30
-  dry_run: false
-  max_concurrent_orders: 5          # Scaled for $12 balance (raise to 40 when funded)
+  poll_interval_seconds: 15          # Ultra-fast: 2× the reaction speed of the old 30s tick
+  dry_run: false                     # LIVE — real money, real orders, real fills
+  auto_start: false                  # Don't auto-start on server boot — require manual Start click
+  max_concurrent_orders: 10         # Scaled for $36 balance — room for ~5 entries + ~5 exits in flight
   log_level: INFO
 
 capital:
   reserve_pct: 10
 
 circuit_breaker:
-  max_daily_loss_usdc: 4         # $4 max daily loss (scaled for $12 test balance — raise when funded)
+  max_daily_loss_usdc: 7         # $7 max daily loss (~20% of $36 balance — aggressive circuit breaker)
   max_drawdown_pct: 0.20         # Stop if down more than 20% from session-start balance (~$2.40 on $12)
   max_consecutive_losses: 5      # Stop after 5 straight losing trades
   max_orders_per_minute: 15      # Runaway loop guard — halt if >15 orders placed in 60s
@@ -17,22 +18,22 @@ strategies:
 
   near_certainty:
     enabled: true
-    capital_pct: 20
+    capital_pct: 30                  # 30% × $36 = $10.80 — room for 2 concurrent $5 trades
     min_price: 0.93
-    max_hours_to_resolution: 168     # Only buy markets resolving within 1 week
+    max_hours_to_resolution: 720   # 30 days — current markets all resolve months out, 1-week window was too tight
     min_market_volume: 0
-    order_size_usdc: 2               # Scaled for $12 balance (raise to 50 when funded)
+    order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
     min_net_return_pct: 1.0
     use_kelly_sizing: true           # Size by edge magnitude (Kelly criterion)
     kelly_fraction: 0.25             # Quarter-Kelly for safety
 
   inverted_near_certainty:           # Buy NO on markets where YES < 7 cents
     enabled: true
-    capital_pct: 20
+    capital_pct: 30                  # 30% × $36 = $10.80 — room for 2 concurrent $5 trades
     max_yes_price: 0.07              # YES must be priced below $0.07
-    max_hours_to_resolution: 168     # Only buy markets resolving within 1 week
+    max_hours_to_resolution: 720   # 30 days — matches near_certainty window expansion
     min_market_volume: 0
-    order_size_usdc: 2               # Scaled for $12 balance
+    order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
     min_net_return_pct: 1.0
     use_kelly_sizing: true
     kelly_fraction: 0.25
@@ -43,22 +44,22 @@ strategies:
     min_daily_volume: 0              # sorts by volume, makes markets on highest-vol first
     spread_pct: 0.02
     max_open_orders_per_market: 2
-    order_size_usdc: 2               # Scaled for $12 balance
+    order_size_usdc: 5               # Raised from 2 → 5 so NO-side orders clear the 5-share minimum at $0.98
     num_markets: 3                   # Fewer markets while balance is tiny
-    refresh_interval_seconds: 60
+    refresh_interval_seconds: 30     # Tighter quote refresh for fast-moving markets
 
   logical_arb:
     enabled: true
     capital_pct: 15
     min_arb_pct: 0.03
-    order_size_usdc: 2               # Scaled for $12 balance
+    order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
     min_outcomes: 2
 
   ai_trader:
     enabled: true
     capital_pct: 15                  # Reduced — whale_tracker is a new alpha source
-    order_size_usdc: 2               # Scaled for $12 balance (raise to 50 when funded)
-    min_edge_pct: 0.12               # Need ≥12% gap between AI estimate and market price
+    order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
+    min_edge_pct: 0.08               # Lowered from 12% → 8% — ensemble was too restrictive
     min_market_price: 0.10
     max_market_price: 0.90
     max_markets_per_run: 8           # Analyse max 8 markets per hour (API cost control)
@@ -67,8 +68,9 @@ strategies:
     model: claude-haiku-4-5-20251001
     use_kelly_sizing: true
     kelly_fraction: 0.25
-    # Ensemble: set ensemble_enabled: true and add OPENAI_API_KEY to env vars
-    ensemble_enabled: true
+    # Ensemble disabled — Claude+GPT always disagreed on current market inventory,
+    # resulting in zero trades. Claude alone is more decisive.
+    ensemble_enabled: false
     openai_model: gpt-4o-mini
     # Bayesian calibration — how much to trust AI per category (1.0 = full trust)
     calibration:
@@ -82,26 +84,27 @@ strategies:
   whale_tracker:
     enabled: true
     capital_pct: 15                  # 15% of portfolio for momentum trades
-    order_size_usdc: 2               # Scaled for $12 balance
+    order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
     min_move_pct: 0.05               # 5% price move triggers entry
-    lookback_ticks: 4                # Compare to 4 ticks ago (~2 min at 30s/tick)
-    top_markets: 30                  # Monitor top 30 markets by volume
+    lookback_ticks: 8                # Compare to 8 ticks ago (~2 min at 15s/tick)
+    top_markets: 300                 # Raised from 30 → 300: NBA MVP markets dominate top 30 at <10¢,
+                                     # all filtered by mid>0.10 gate. Need wider scan to find 10-90¢ markets.
     min_net_return_pct: 0.5          # Lower bar than near-certainty — short-term hold
     use_kelly_sizing: true
     kelly_fraction: 0.20             # More conservative for momentum
 
   position_monitor:
     enabled: true
-    take_profit_pct: 0.15            # Exit when position is up 15%
-    stop_loss_pct: 0.08              # Exit when position is down 8% (tighter for fast trading)
+    take_profit_pct: 0.02            # Exit on any 2% gain — fast capital recycling on tight-spread markets
+    stop_loss_pct: 0.05              # Exit when position is down 5% — tight stops
     exit_size_usdc: 200              # Max USDC per exit order
     max_hold_hours:                  # Force-exit after this many hours (per strategy)
-      whale_tracker: 2               # Momentum fades in <1h; 2h is the hard cap
-      ai_trader: 6                   # AI edge window — price converges within hours
-      logical_arb: 24               # Arb gaps rarely persist more than a day
-      near_certainty: 48            # Fast-resolution holds only; exit if not filled
-      inverted_near_certainty: 48
-      default: 24                   # Catch-all for any strategy not listed
+      whale_tracker: 0.5             # Momentum fades fast — 30 min hard cap
+      ai_trader: 1                   # AI edge should realize inside an hour or it's wrong
+      logical_arb: 0.5               # Arb gaps close in minutes
+      near_certainty: 1              # Reduced from 4h — recycle capital hourly
+      inverted_near_certainty: 1     # Reduced from 4h — recycle capital hourly
+      default: 0.5                   # Nothing sits longer than 30 min
 
   cross_platform_arb:
     enabled: false                   # Disabled — Kalshi approval pending
@@ -110,7 +113,13 @@ strategies:
     order_size_usdc: 100
 
   news_catalyst:
-    enabled: false
-    capital_pct: 0
-    reaction_window_seconds: 10
-    order_size_usdc: 100
+    enabled: true
+    capital_pct: 10                  # 10% of portfolio for news-driven trades
+    order_size_usdc: 5               # Meets Polymarket 5-share minimum at most prices
+    run_interval_seconds: 120        # Poll headlines every 2 min (respects NewsAPI free tier)
+    max_headlines_per_run: 10        # Top N headlines scanned per run
+    max_markets_in_prompt: 40        # How many candidate markets Claude sees per headline
+    min_confidence: high             # Only trade on "high" confidence classifier output
+    slug_cooldown_seconds: 3600      # Don't re-trade the same market within 1 hour
+    model: claude-haiku-4-5-20251001 # Cheap, fast classification model
+    news_country: us                 # Top-headlines country code

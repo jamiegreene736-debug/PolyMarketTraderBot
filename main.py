@@ -30,6 +30,8 @@ from src.strategies.market_making import MarketMakingStrategy
 from src.strategies.logical_arb import LogicalArbStrategy
 from src.strategies.cross_platform import CrossPlatformArbStrategy
 from src.strategies.news_catalyst import NewsCatalystStrategy
+from src.strategies.position_monitor import PositionMonitorStrategy
+from src.strategies.whale_tracker import WhaleTrackerStrategy
 
 
 def load_config() -> dict:
