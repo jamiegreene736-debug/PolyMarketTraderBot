@@ -69,27 +69,50 @@ async def run_bot_loop():
     config = load_config()
     bot_cfg = config.get("bot", {})
 
-    key_id = os.getenv("POLYMARKET_KEY_ID")
-    secret_key = os.getenv("POLYMARKET_SECRET_KEY")
+    api_key         = os.getenv("POLY_API_KEY", "").strip()
+    api_secret      = os.getenv("POLY_API_SECRET", "").strip()
+    api_passphrase  = os.getenv("POLY_API_PASSPHRASE", "").strip()
+    private_key     = os.getenv("POLY_PRIVATE_KEY", "").strip()
+    funder_address  = os.getenv("POLY_FUNDER_ADDRESS", "").strip()
 
-    if not key_id or not secret_key:
+    if not api_key or not api_secret or not api_passphrase or not private_key:
+        missing = [k for k, v in {
+            "POLY_API_KEY":        api_key,
+            "POLY_API_SECRET":     api_secret,
+            "POLY_API_PASSPHRASE": api_passphrase,
+            "POLY_PRIVATE_KEY":    private_key,
+        }.items() if not v]
         _bot_state["status"] = "error"
-        _bot_state["last_error"] = "Missing POLYMARKET_KEY_ID or POLYMARKET_SECRET_KEY"
+        _bot_state["last_error"] = f"Missing env vars: {', '.join(missing)}"
         logger.error(_bot_state["last_error"])
         return
 
     client = PolymarketClient(
-        key_id=key_id,
-        secret_key=secret_key,
-        dry_run=bot_cfg.get("dry_run", False),
+        api_key        = api_key,
+        api_secret     = api_secret,
+        api_passphrase = api_passphrase,
+        private_key    = private_key,
+        funder_address = funder_address,  # Gnosis Safe proxy — lets CLOB see real balance
+        dry_run        = bot_cfg.get("dry_run", False),
     )
     await client.connect()
 
+    # Set ERC-20 spending approvals for the CLOB exchange contracts so the
+    # signer address can place orders once USDC arrives.  Safe to call every
+    # startup — the CLOB ignores the call if approvals are already sufficient.
+    if not bot_cfg.get("dry_run", False):
+        await client.setup_allowances()
+
     market_data = MarketData(client)
-    order_manager = OrderManager(client, max_concurrent=bot_cfg.get("max_concurrent_orders", 20))
+    order_manager = OrderManager(
+        client,
+        max_concurrent=bot_cfg.get("max_concurrent_orders", 20),
+        market_data=market_data,
+        min_liquidity_multiple=bot_cfg.get("min_liquidity_multiple", 3.0),
+    )
 
     # Fetch real balance at startup so capital manager is accurate from tick 1
-    startup_balance = 1000.0
+    startup_balance = 0.0
     try:
         balance_data = await client.get_balance()
         for key in ("availableBalance", "balance", "usdc", "availableUsdc", "cashBalance"):
@@ -99,7 +122,32 @@ async def run_bot_loop():
                 break
         logger.info(f"Startup balance: ${startup_balance:.2f} USDC")
     except Exception as e:
-        logger.warning(f"Could not fetch startup balance, defaulting to $1000: {e}")
+        logger.warning(f"Could not fetch startup balance: {e}")
+
+    dry_run = bot_cfg.get("dry_run", False)
+
+    # In dry-run mode, use a realistic test balance if the real balance is $0
+    if dry_run and startup_balance < 1.0:
+        startup_balance = 36.0
+        logger.info(f"Dry-run: using simulated $36 balance for strategy testing")
+
+    # In live mode, the CLOB's get_balance_allowance may return $0 for
+    # email/magic-link accounts whose funds are held in a Gnosis Safe proxy
+    # rather than a raw EOA. If a POLY_STARTING_BALANCE override is set and
+    # the CLOB returned $0, use the override so strategies can attempt orders.
+    # The exchange validates funds at execution time — if funds truly aren't
+    # available, individual orders will fail and the bot will log/skip them.
+    if not dry_run and startup_balance < 1.0:
+        override = os.getenv("POLY_STARTING_BALANCE", "").strip()
+        if override:
+            try:
+                startup_balance = float(override)
+                logger.warning(
+                    f"CLOB returned $0 balance — using POLY_STARTING_BALANCE override: "
+                    f"${startup_balance:.2f}. Orders will be validated by the exchange."
+                )
+            except ValueError:
+                logger.warning(f"Invalid POLY_STARTING_BALANCE value: {override!r}")
 
     capital = CapitalManager(
         total_usdc=startup_balance,
@@ -134,7 +182,8 @@ async def run_bot_loop():
         CrossPlatformArbStrategy("cross_platform_arb", config["strategies"]["cross_platform_arb"],
                                  client, market_data, order_manager, capital),
         NewsCatalystStrategy("news_catalyst", config["strategies"]["news_catalyst"],
-                             client, market_data, order_manager, capital),
+                             client, market_data, order_manager, capital,
+                             news_client=news_client),
     ]
 
     enabled = [s for s in strategies if s.enabled]
@@ -152,14 +201,21 @@ async def run_bot_loop():
         while _bot_state["status"] == "running":
             try:
                 # Refresh balance every 10 ticks
-                if balance_refresh_counter % 10 == 0:
+                # In dry-run mode, skip real balance updates — CLOB reports $0 because
+                # funds are in the CTF Exchange contract, which would immediately trip the
+                # circuit breaker against the simulated $36 startup balance.
+                if balance_refresh_counter % 10 == 0 and not dry_run:
                     try:
                         balance_data = await client.get_balance()
                         for key in ("availableBalance", "balance", "usdc", "availableUsdc", "cashBalance"):
                             val = balance_data.get(key)
                             if val is not None:
                                 balance = float(val)
-                                capital.update_balance(balance)
+                                # Only update if CLOB returns a real value.
+                                # $0 means the proxy wallet auth hasn't resolved yet —
+                                # keeping the override prevents a false circuit-breaker trip.
+                                if balance > 0:
+                                    capital.update_balance(balance)
                                 # Fetch real realized PnL for the chart
                                 try:
                                     stats_snap = await db.get_dashboard_stats()
@@ -229,10 +285,18 @@ async def run_bot_loop():
 
 async def _auto_restart_bot():
     """
-    Supervisor loop: starts the bot immediately on server boot, and
-    automatically restarts it if it crashes — with a 10-second cooldown
-    between attempts so we don't spin-loop on a bad config.
+    Supervisor loop: optionally starts the bot on server boot (if auto_start: true
+    in config), then automatically restarts it if it crashes — with a 10-second
+    cooldown between attempts so we don't spin-loop on a bad config.
     """
+    # Respect auto_start config — default False so the user clicks Start themselves.
+    cfg = load_config()
+    if not cfg.get("bot", {}).get("auto_start", False):
+        logger.info("auto_start=false — waiting for manual Start from dashboard")
+        _bot_state["status"] = "stopped"
+        while _bot_state.get("status") == "stopped":
+            await asyncio.sleep(5)
+
     while True:
         logger.info("Auto-starting bot loop...")
         _bot_state["status"] = "running"
@@ -302,7 +366,12 @@ async def dashboard(_=Depends(verify_password)):
 
 @app.get("/api/stats")
 async def api_stats(_=Depends(verify_password)):
-    return await db.get_dashboard_stats()
+    stats = await db.get_dashboard_stats()
+    # DB misses dry-run orders (never persisted to trades table). Override open_positions
+    # with the live in-memory count so the dashboard card stays accurate.
+    if _order_manager is not None:
+        stats["open_positions"] = _order_manager.get_total_open_orders()
+    return stats
 
 
 @app.get("/api/status")
@@ -356,16 +425,22 @@ async def api_clear_logs(_=Depends(verify_password)):
 
 @app.post("/api/reset-data")
 async def api_reset_data(_=Depends(verify_password)):
-    """Wipe all trades, balance snapshots, and logs. Bot must be stopped first."""
+    """Wipe all trades, balance snapshots, logs, and in-memory positions."""
     task = _bot_state.get("task")
     if task and not task.done():
         raise HTTPException(status_code=400, detail="Stop the bot before resetting data")
+    # Clear database
     async with __import__('aiosqlite').connect('bot_data.db') as conn:
         await conn.execute("DELETE FROM trades")
         await conn.execute("DELETE FROM balance_snapshots")
         await conn.execute("DELETE FROM bot_logs")
         await conn.commit()
-    logger.info("All data reset via dashboard")
+    # Clear in-memory state so the dashboard shows clean zeros immediately
+    if _order_manager is not None:
+        _order_manager.clear()
+    if _capital is not None:
+        _capital._allocated.clear()
+    logger.info("All data reset via dashboard (DB + in-memory)")
     return {"ok": True}
 
 
@@ -378,12 +453,15 @@ async def api_positions(_=Depends(verify_password)):
     positions = _order_manager.get_open_positions()
     position_value = sum(p["price"] * p["quantity"] for p in positions)
 
-    cash = _capital.total_usdc if _capital else 0
+    # total_usdc is the full balance ($36). Positions are funded FROM it, not in
+    # addition to it. cash = what's left after positions; total stays at $36.
+    total = _capital.total_usdc if _capital else 0
+    cash  = max(0.0, total - position_value)
     return {
         "positions": positions,
         "cash_balance": round(cash, 2),
         "position_value": round(position_value, 2),
-        "total": round(cash + position_value, 2),
+        "total": round(total, 2),
     }
 
 
