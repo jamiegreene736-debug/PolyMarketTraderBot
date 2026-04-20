@@ -71,8 +71,6 @@ class PolymarketClient:
             api_secret     = self.api_secret,
             api_passphrase = self.api_passphrase,
         )
-
-        # ── Step 1: connect in EOA mode first to run diagnostics ─────────────
         self._client = await asyncio.to_thread(
             ClobClient,
             CLOB_HOST,
@@ -80,104 +78,7 @@ class PolymarketClient:
             key      = self.private_key,
             creds    = creds,
         )
-        logger.info(f"Polymarket CLOB client connected (dry_run={self.dry_run})")
-
-        # ── Step 2: probe all sig types, auto-discover the proxy wallet ───────
-        # The CLOB has an internal EOA→proxy mapping. Querying balance with
-        # sig_type=1 lets the server reveal which proxy wallet it associates
-        # with our EOA signer. We extract that address and use it as funder.
-        discovered_proxy = None
-        proxy_balance    = 0.0
-
-        for stype, label in [(0, "EOA"), (1, "POLY_PROXY"), (2, "POLY_GNOSIS_SAFE")]:
-            try:
-                raw = await asyncio.to_thread(
-                    self._client.get_balance_allowance,
-                    BalanceAllowanceParams(
-                        asset_type=AssetType.COLLATERAL,
-                        signature_type=stype,
-                    ),
-                )
-                logger.info(f"CLOB balance probe sig_type={stype} ({label}): {raw}")
-
-                # Extract balance amount
-                bal_raw = None
-                for key in ("balance", "availableBalance", "USDC", "usdc"):
-                    v = raw.get(key) if isinstance(raw, dict) else None
-                    if v is not None:
-                        try:
-                            bal_raw = float(v)
-                            break
-                        except (TypeError, ValueError):
-                            pass
-
-                # Look for a proxy/funder wallet address in the response
-                if isinstance(raw, dict):
-                    for key in ("proxyWallet", "proxy_wallet", "funder",
-                                "makerAddress", "maker_address", "address"):
-                        addr = raw.get(key)
-                        if addr and isinstance(addr, str) and addr.startswith("0x"):
-                            logger.info(
-                                f"CLOB returned proxy address via '{key}': {addr}"
-                            )
-                            if discovered_proxy is None and stype == 1:
-                                discovered_proxy = addr
-
-                bal_usdc = (bal_raw / 1_000_000 if (bal_raw and bal_raw >= 100_000)
-                            else bal_raw or 0.0)
-                logger.info(
-                    f"CLOB balance sig_type={stype} ({label}): ${bal_usdc:.2f}"
-                )
-                if bal_usdc > proxy_balance and stype == 1:
-                    proxy_balance = bal_usdc
-
-            except Exception as e:
-                logger.warning(f"CLOB balance probe sig_type={stype} ({label}) failed: {e}")
-
-        # Also query api_keys — may contain the proxy wallet address
-        try:
-            api_keys_resp = await asyncio.to_thread(self._client.get_api_keys)
-            logger.info(f"CLOB get_api_keys raw: {api_keys_resp}")
-            # Some Polymarket CLOB responses embed the proxy address here
-            if isinstance(api_keys_resp, dict):
-                for key in ("proxyWallet", "proxy_wallet", "funder", "address",
-                            "makerAddress", "maker"):
-                    addr = api_keys_resp.get(key)
-                    if addr and isinstance(addr, str) and addr.startswith("0x"):
-                        if discovered_proxy is None:
-                            discovered_proxy = addr
-                            logger.info(
-                                f"Proxy address discovered from api_keys['{key}']: {addr}"
-                            )
-        except Exception as e:
-            logger.warning(f"CLOB get_api_keys failed: {e}")
-
-        # ── Step 3: if we found a proxy, reinitialise with sig_type=1 ─────────
-        # Use the CLOB-discovered proxy wallet (overrides the env-var guess).
-        effective_funder = discovered_proxy or self.funder_address
-        if effective_funder:
-            logger.info(
-                f"Reinitialising ClobClient with sig_type=1, funder={effective_funder}"
-            )
-            self._client = await asyncio.to_thread(
-                ClobClient,
-                CLOB_HOST,
-                chain_id       = CHAIN_ID,
-                key            = self.private_key,
-                creds          = creds,
-                signature_type = 1,     # POLY_PROXY
-                funder         = effective_funder,
-            )
-            self.funder_address = effective_funder
-            logger.info(
-                f"CLOB ready: proxy-wallet mode funder={effective_funder} "
-                f"(proxy_balance=${proxy_balance:.2f})"
-            )
-        else:
-            logger.info(
-                "CLOB ready: EOA mode (no proxy wallet discovered — "
-                "fund 0xa16811... directly)"
-            )
+        logger.info(f"Polymarket CLOB client connected (dry_run={self.dry_run}, EOA mode)")
 
     async def setup_allowances(self):
         """
