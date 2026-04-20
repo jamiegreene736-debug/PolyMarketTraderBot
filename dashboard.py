@@ -96,12 +96,18 @@ async def run_bot_loop():
         dry_run        = bot_cfg.get("dry_run", False),
     )
     await client.connect()
+    # connect() auto-discovers the proxy wallet and logs to Railway.
+    # Write the discovered funder to the dashboard log panel too.
+    await db.log_to_db(
+        "INFO",
+        f"CLOB auth: signer=0xa16811... funder={client.funder_address or 'none (EOA mode)'}"
+    )
 
     # Set ERC-20 spending approvals for the CLOB exchange contracts.
     # Skip in proxy-wallet mode: the proxy wallet's allowances are already
     # managed by Polymarket's contracts — calling this would attempt to approve
     # from the EOA (which has $0) and generate misleading warnings.
-    if not bot_cfg.get("dry_run", False) and not funder_address:
+    if not bot_cfg.get("dry_run", False) and not client.funder_address:
         await client.setup_allowances()
 
     market_data = MarketData(client)
