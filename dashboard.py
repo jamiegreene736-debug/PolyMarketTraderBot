@@ -55,6 +55,7 @@ _bot_state = {
 _order_manager: "OrderManager | None" = None
 _capital: "CapitalManager | None" = None
 _circuit_breaker: "CircuitBreaker | None" = None
+_client_ref: "PolymarketClient | None" = None
 
 
 def load_config() -> dict:
@@ -65,7 +66,7 @@ def load_config() -> dict:
 # ── Bot loop ──────────────────────────────────────────────────────────────────
 
 async def run_bot_loop():
-    global _order_manager, _capital, _circuit_breaker
+    global _order_manager, _capital, _circuit_breaker, _client_ref
     config = load_config()
     bot_cfg = config.get("bot", {})
 
@@ -104,6 +105,7 @@ async def run_bot_loop():
         dry_run        = bot_cfg.get("dry_run", False),
     )
     await client.connect()
+    _client_ref = client
 
     await db.log_to_db(
         "INFO",
@@ -374,6 +376,11 @@ def verify_password(credentials: HTTPBasicCredentials = Depends(security)):
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(_=Depends(verify_password)):
     stats = await db.get_dashboard_stats()
+    if _client_ref is not None:
+        try:
+            stats["open_positions"] = len(await _client_ref.get_positions())
+        except Exception:
+            pass
     template = jinja_env.get_template("index.html")
     html = template.render(**stats)
     return HTMLResponse(content=html)
@@ -382,10 +389,11 @@ async def dashboard(_=Depends(verify_password)):
 @app.get("/api/stats")
 async def api_stats(_=Depends(verify_password)):
     stats = await db.get_dashboard_stats()
-    # DB misses dry-run orders (never persisted to trades table). Override open_positions
-    # with the live in-memory count so the dashboard card stays accurate.
-    if _order_manager is not None:
-        stats["open_positions"] = _order_manager.get_total_open_orders()
+    if _client_ref is not None:
+        try:
+            stats["open_positions"] = len(await _client_ref.get_positions())
+        except Exception:
+            pass
     return stats
 
 
@@ -522,17 +530,36 @@ async def api_reset_data(_=Depends(verify_password)):
 
 @app.get("/api/positions")
 async def api_positions(_=Depends(verify_password)):
-    """Return all open in-memory positions with balance breakdown."""
-    if _order_manager is None:
+    """Return live Polymarket positions with balance breakdown."""
+    if _client_ref is None:
         return {"positions": [], "cash_balance": 0, "position_value": 0, "total": 0}
 
-    positions = _order_manager.get_open_positions()
-    position_value = sum(p["price"] * p["quantity"] for p in positions)
+    cash_data = await _client_ref.get_balance()
+    cash = float(cash_data.get("availableBalance") or cash_data.get("balance") or 0.0)
 
-    # total_usdc is the full balance ($36). Positions are funded FROM it, not in
-    # addition to it. cash = what's left after positions; total stays at $36.
-    total = _capital.total_usdc if _capital else 0
-    cash  = max(0.0, total - position_value)
+    raw_positions = await _client_ref.get_positions()
+    positions = []
+    for p in raw_positions:
+        outcome = str(p.get("outcome") or "").upper()
+        intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
+        avg_price = float(p.get("avgPrice") or 0.0)
+        size = float(p.get("size") or 0.0)
+        current_value = float(p.get("currentValue") or (avg_price * size) or 0.0)
+        positions.append({
+            "order_id": "",
+            "market_slug": p.get("slug") or p.get("title") or "—",
+            "title": p.get("title") or p.get("slug") or "—",
+            "intent": intent,
+            "price": avg_price,
+            "quantity": size,
+            "current_value": current_value,
+            "outcome": p.get("outcome") or "—",
+            "strategy": "live position",
+            "closable": False,
+        })
+
+    position_value = sum(p["current_value"] for p in positions)
+    total = cash + position_value
     return {
         "positions": positions,
         "cash_balance": round(cash, 2),

@@ -339,7 +339,7 @@
     <div class="stat-card">
       <div class="label">Open Positions</div>
       <div id="statOpenPositions" class="value">{{ open_positions }}</div>
-      <div class="sub">Active orders</div>
+      <div class="sub">Live positions</div>
     </div>
     <div class="stat-card">
       <div class="label">Total Trades</div>
@@ -580,7 +580,9 @@
       document.getElementById('cashBalance').textContent    = '$' + data.cash_balance.toFixed(2);
       document.getElementById('positionValue').textContent  = '$' + data.position_value.toFixed(2);
       document.getElementById('totalBalance').textContent   = '$' + data.total.toFixed(2);
-      document.getElementById('positionCount').textContent  = data.positions.length + ' open trade' + (data.positions.length !== 1 ? 's' : '');
+      document.getElementById('positionCount').textContent  = data.positions.length + ' live position' + (data.positions.length !== 1 ? 's' : '');
+      const opEl = document.getElementById('statOpenPositions');
+      if (opEl) opEl.textContent = data.positions.length;
 
       // Open positions table
       const tbody = document.getElementById('openPositionsBody');
@@ -590,25 +592,23 @@
       }
 
       tbody.innerHTML = data.positions.map(p => {
-        const cost      = (p.price * p.quantity).toFixed(2);
-        const side      = p.intent.replace('ORDER_INTENT_', '').replace(/_/g, ' ');
+        const cost      = (p.current_value ?? (p.price * p.quantity)).toFixed(2);
         const sideColor = p.intent.includes('BUY_LONG') ? '#60a5fa' : '#f87171';
-        const label     = p.intent.includes('BUY_LONG') ? 'YES' : 'NO';
-        const market    = p.market_slug || '—';
+        const label     = p.outcome || (p.intent.includes('BUY_LONG') ? 'YES' : 'NO');
+        const market    = p.title || p.market_slug || '—';
         const strategy  = (p.strategy || '—').replace(/_/g, ' ');
+        const actionCell = p.closable && p.order_id
+          ? `<button class="btn-close-pos" onclick="closePosition('${p.order_id}', this)">Close</button>`
+          : '<span style="color:#475569;">Live on Polymarket</span>';
         return `
-          <tr id="row-${p.order_id}">
+          <tr id="row-${p.order_id || market}">
             <td>${strategy}</td>
             <td style="max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${market}">${market}</td>
             <td><span style="color:${sideColor}; font-weight:600;">${label}</span></td>
             <td>$${parseFloat(p.price).toFixed(4)}</td>
             <td>${parseFloat(p.quantity).toFixed(1)}</td>
             <td>$${cost}</td>
-            <td>
-              <button class="btn-close-pos" onclick="closePosition('${p.order_id}', this)">
-                Close
-              </button>
-            </td>
+            <td>${actionCell}</td>
           </tr>`;
       }).join('');
     } catch (e) { /* silent */ }

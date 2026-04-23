@@ -30,6 +30,7 @@ from py_clob_client.order_builder.constants import BUY
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
+DATA_API = "https://data-api.polymarket.com"
 CHAIN_ID  = 137  # Polygon mainnet
 SIG_TYPE_EOA = 0
 SIG_TYPE_POLY_PROXY = 1
@@ -614,7 +615,29 @@ class PolymarketClient:
             return {"balance": 0.0, "availableBalance": 0.0}
 
     async def get_positions(self) -> list:
-        return []
+        user = (self.funder_address or self.signer_address or "").strip()
+        if not user:
+            return []
+
+        try:
+            resp = await self._http.get(
+                f"{DATA_API}/positions",
+                params={
+                    "user": user,
+                    "sizeThreshold": 0,
+                    "limit": 500,
+                    "sortBy": "CURRENT",
+                    "sortDirection": "DESC",
+                },
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            positions = raw if isinstance(raw, list) else []
+            logger.info(f"get_positions: {len(positions)} live positions for {user}")
+            return positions
+        except Exception as e:
+            logger.warning(f"get_positions failed: {e}")
+            return []
 
     async def get_activities(self) -> list:
         return []
