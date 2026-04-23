@@ -105,7 +105,10 @@ class MarketMakingStrategy(BaseStrategy):
                         self.capital_manager.release(self.name, order_size)
 
             # Place SELL side (short YES at ask = buy NO)
-            if self.capital_manager.can_allocate(self.name, order_size):
+            if (
+                self.order_manager.get_market_order_count(slug) < max_orders
+                and self.capital_manager.can_allocate(self.name, order_size)
+            ):
                 no_price   = round(1 - our_ask, 4)
                 shares_ask = round(order_size / max(no_price, 0.01), 2)
                 if self.capital_manager.allocate(self.name, order_size):

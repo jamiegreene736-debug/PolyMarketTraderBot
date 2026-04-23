@@ -176,6 +176,7 @@ async def run_bot_loop():
         strategy_config=config.get("strategies", {}),
         reserve_pct=config.get("capital", {}).get("reserve_pct", 10),
     )
+    order_manager.attach_capital_manager(capital)
 
     news_client = NewsClient(api_key=os.getenv("NEWS_API_KEY", ""))
 

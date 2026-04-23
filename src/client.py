@@ -774,15 +774,13 @@ class PolymarketClient:
                 oid      = od.get("id") or od.get("orderId") or od.get("order_id") or ""
                 if not oid:
                     continue
+                quantity = self._remaining_order_size(od)
                 result.append({
                     "id":          oid,
                     "market_slug": slug,
                     "intent":      self._derive_intent(od, asset_id),
                     "price":       float(od.get("price", 0) or 0),
-                    "quantity":    float(
-                        od.get("size_matched") or od.get("original_size")
-                        or od.get("size") or 0
-                    ),
+                    "quantity":    quantity,
                 })
             return result
         except Exception as e:
@@ -859,3 +857,33 @@ class PolymarketClient:
         except Exception as e:
             logger.warning(f"cancel_all_orders: {e}")
             return False
+
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _remaining_order_size(cls, order: dict) -> float:
+        for key in ("remaining_size", "remainingSize", "size_remaining", "sizeRemaining"):
+            remaining = cls._safe_float(order.get(key), -1.0)
+            if remaining >= 0:
+                return remaining
+
+        size = cls._safe_float(order.get("quantity") or order.get("size"), -1.0)
+        if size >= 0:
+            return size
+
+        original = cls._safe_float(
+            order.get("original_size") or order.get("originalSize"),
+            0.0,
+        )
+        matched = cls._safe_float(
+            order.get("size_matched") or order.get("sizeMatched"),
+            0.0,
+        )
+        if original > 0:
+            return max(0.0, original - matched)
+        return 0.0

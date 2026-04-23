@@ -24,11 +24,15 @@ class OrderManager:
         self.max_concurrent = max_concurrent
         self.market_data = market_data               # optional — used for liquidity gate
         self.min_liquidity_multiple = min_liquidity_multiple
+        self.capital_manager = None                  # optional — attached after startup balance loads
         self._open_orders: dict[str, dict] = {}     # order_id -> order info
         self._market_orders: dict[str, list] = {}   # market_slug -> [order_ids]
         self._lock = asyncio.Lock()
         self._request_times: list[float] = []
         self._rate_limit = 8                         # max requests per second
+
+    def attach_capital_manager(self, capital_manager):
+        self.capital_manager = capital_manager
 
     async def place_order(self, market_slug: str, question: str, intent: str,
                           price: float, quantity: float, strategy: str,
@@ -55,11 +59,22 @@ class OrderManager:
             await db.log_to_db("WARNING", msg)
             return None
 
+        notional = max(0.0, float(price or 0.0) * float(quantity or 0.0))
+        available_for_orders = self.get_available_order_capacity_usdc()
+        if available_for_orders is not None and notional > available_for_orders:
+            msg = (
+                f"[order] SKIP {intent} on {market_slug}: notional ${notional:.2f} "
+                f"exceeds exchange-safe capacity ${available_for_orders:.2f} "
+                f"(tracked active orders=${self.get_open_order_notional_usdc():.2f})."
+            )
+            logger.warning(msg)
+            await db.log_to_db("WARNING", msg)
+            return None
+
         # Liquidity gate: skip thin markets where we can't get in/out without
         # moving price against ourselves. Uses the market's `liquidity` field
         # as a proxy for total book depth.
         if self.market_data is not None and self.min_liquidity_multiple > 0:
-            notional = quantity * price
             liquidity = self.market_data.get_market_liquidity(market_slug)
             required = notional * self.min_liquidity_multiple
             # Skip the check if the market has no liquidity metadata at all
@@ -243,10 +258,7 @@ class OrderManager:
                     price = 0.0
 
                 # Normalise quantity
-                try:
-                    quantity = float(o.get("quantity") or o.get("size") or 0)
-                except (TypeError, ValueError):
-                    quantity = 0.0
+                quantity = self._remaining_order_size(o)
 
                 # Back-fill from DB if we have a record
                 meta = db_meta.get(order_id, {})
@@ -304,6 +316,26 @@ class OrderManager:
     def get_total_open_orders(self) -> int:
         return len(self._open_orders)
 
+    def get_open_order_notional_usdc(self) -> float:
+        total = 0.0
+        for order in self._open_orders.values():
+            side = str(order.get("execution_side") or "BUY").upper()
+            if side == "SELL":
+                continue
+            try:
+                total += float(order.get("price") or 0.0) * float(order.get("quantity") or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return max(0.0, total)
+
+    def get_available_order_capacity_usdc(self) -> float | None:
+        if self.capital_manager is None:
+            return None
+
+        reserve = self.capital_manager.total_usdc * (self.capital_manager.reserve_pct / 100)
+        tradeable = max(0.0, self.capital_manager.total_usdc - reserve)
+        return max(0.0, tradeable - self.get_open_order_notional_usdc())
+
     def clear(self):
         """Wipe all in-memory position state. Called by Reset Data from the dashboard."""
         self._open_orders.clear()
@@ -342,3 +374,33 @@ class OrderManager:
             if sleep_time > 0:
                 await asyncio.sleep(sleep_time)
         self._request_times.append(asyncio.get_event_loop().time())
+
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _remaining_order_size(cls, order: dict) -> float:
+        for key in ("remaining_size", "remainingSize", "size_remaining", "sizeRemaining"):
+            remaining = cls._safe_float(order.get(key), -1.0)
+            if remaining >= 0:
+                return remaining
+
+        size = cls._safe_float(order.get("quantity") or order.get("size"), -1.0)
+        if size >= 0:
+            return size
+
+        original = cls._safe_float(
+            order.get("original_size") or order.get("originalSize"),
+            0.0,
+        )
+        matched = cls._safe_float(
+            order.get("size_matched") or order.get("sizeMatched"),
+            0.0,
+        )
+        if original > 0:
+            return max(0.0, original - matched)
+        return 0.0
