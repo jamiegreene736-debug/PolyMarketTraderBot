@@ -138,7 +138,9 @@ class AITradingStrategy(BaseStrategy):
         self._estimate_cache: dict[str, tuple[float, dict]] = {}  # slug → (timestamp, estimate)
         self._cache_ttl      = self.config.get("cache_ttl_seconds", 7200)
         self._run_interval   = self.config.get("run_interval_seconds", 3600)
+        self._wait_log_interval = self.config.get("wait_log_interval_seconds", 300)
         self._last_run: float = 0
+        self._last_wait_log: float = 0
 
     # ── Entry point ───────────────────────────────────────────────────────────
 
@@ -149,8 +151,10 @@ class AITradingStrategy(BaseStrategy):
         now = asyncio.get_event_loop().time()
         elapsed = now - self._last_run
         if elapsed < self._run_interval:
-            remaining = int(self._run_interval - elapsed)
-            self.log(f"Next AI scan in {remaining // 60}m {remaining % 60}s")
+            if now - self._last_wait_log >= self._wait_log_interval:
+                remaining = int(self._run_interval - elapsed)
+                self.log(f"AI trader idle by schedule; next scan in {remaining // 60}m {remaining % 60}s")
+                self._last_wait_log = now
             return
 
         self._last_run = now

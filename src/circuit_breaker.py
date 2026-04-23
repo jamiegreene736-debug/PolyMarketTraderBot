@@ -9,7 +9,8 @@ Four independent triggers — any one fires and ALL trading stops:
   2. Portfolio drawdown    — current balance is more than max_drawdown_pct below the
                              session-start balance (catches unrealized losses too)
   3. Consecutive losses    — N straight losing trades without a winner
-  4. Rapid order rate      — more than max_orders_per_minute placed in any 60s window
+  4. Recent realized loss  — small-account loss cluster exceeds a dollar threshold
+  5. Rapid order rate      — more than max_orders_per_minute placed in any 60s window
                              (catches runaway loops / duplicate-trade bugs)
 
 The breaker is checked in the main bot loop BEFORE each strategy tick.
@@ -30,6 +31,8 @@ class CircuitBreaker:
         self.max_daily_loss_usdc    = cfg.get("max_daily_loss_usdc", 50.0)
         self.max_drawdown_pct       = cfg.get("max_drawdown_pct", 0.20)      # 20%
         self.max_consecutive_losses = cfg.get("max_consecutive_losses", 5)
+        self.max_recent_loss_usdc   = cfg.get("max_recent_loss_usdc", 0.25)
+        self.recent_loss_window     = cfg.get("recent_loss_window", 5)
         self.max_orders_per_minute  = cfg.get("max_orders_per_minute", 15)
 
         # State
@@ -83,7 +86,18 @@ class CircuitBreaker:
             )
             return False
 
-        # ── Trigger 4: rapid order rate ───────────────────────────────────────
+        # ── Trigger 4: recent realized loss cluster ───────────────────────────
+        recent = list(recent_pnl_list or [])[: self.recent_loss_window]
+        if len(recent) >= self.recent_loss_window:
+            recent_net = sum(recent)
+            if recent_net <= -abs(self.max_recent_loss_usdc):
+                await self._trip(
+                    f"Recent realized loss limit hit: last {len(recent)} closed trades net "
+                    f"${recent_net:.2f} (limit=-${abs(self.max_recent_loss_usdc):.2f})"
+                )
+                return False
+
+        # ── Trigger 5: rapid order rate ───────────────────────────────────────
         now = datetime.now(timezone.utc).timestamp()
         self._order_timestamps = deque(
             t for t in self._order_timestamps if now - t <= 60

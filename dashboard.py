@@ -272,7 +272,11 @@ async def run_bot_loop():
 
                 # ── Circuit breaker check ─────────────────────────────────
                 try:
-                    recent_closed = await _get_live_closed_positions(limit=150)
+                    recent_closed = sorted(
+                        await _get_live_closed_positions(limit=150),
+                        key=lambda pos: _polymarket_ts_seconds(pos.get("timestamp")),
+                        reverse=True,
+                    )
                     session_start_ts = (
                         _circuit_breaker.session_start_at.timestamp()
                         if _circuit_breaker is not None
@@ -1123,6 +1127,8 @@ async def api_circuit_breaker_status(_=Depends(verify_password)):
             "max_daily_loss_usdc": cb.max_daily_loss_usdc,
             "max_drawdown_pct": cb.max_drawdown_pct,
             "max_consecutive_losses": cb.max_consecutive_losses,
+            "max_recent_loss_usdc": cb.max_recent_loss_usdc,
+            "recent_loss_window": cb.recent_loss_window,
             "max_orders_per_minute": cb.max_orders_per_minute,
         },
         "state": {

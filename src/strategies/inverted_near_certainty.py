@@ -41,11 +41,21 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
         )
 
         if not markets:
-            self.log("No active markets found")
+            stats = await self.market_data.get_resolution_window_stats(max_hours)
+            self.log(
+                f"No candidate markets within {max_hours}h | "
+                f"active={stats['active_markets']} "
+                f"with_time={stats['with_resolution_time']} "
+                f"missing_time={stats['missing_resolution_time']}",
+                level="warning",
+            )
             return
 
         self.log(f"Scanning {len(markets)} markets for near-certain NO (YES<=${max_yes_price})")
         entered = 0
+        price_filtered = 0
+        profit_filtered = 0
+        opportunity_count = 0
 
         # Parallel BBO fetch — see near_certainty.py for rationale.
         market_slugs = [(m, self.market_data.get_slug(m)) for m in markets]
@@ -68,6 +78,7 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
 
             # YES must be priced very low — meaning NO is near certain
             if best_ask > max_yes_price:
+                price_filtered += 1
                 continue
 
             # NO price derived from YES mid (more stable than ask)
@@ -77,10 +88,12 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
             # Fee-aware profit (buying NO at no_price, resolves at 1.00)
             net_profit_pct = fees.net_profit_pct_near_certainty(no_price)
             if net_profit_pct < min_net_return:
+                profit_filtered += 1
                 continue
 
             hours_left = self.market_data._hours_to_resolution(market)
             fee_cost   = fees.taker_fee_per_share(no_price)
+            opportunity_count += 1
 
             self.log(
                 f"NO opportunity: {question[:55]} | "
@@ -136,3 +149,10 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
 
         if entered:
             self.log(f"Entered {entered} inverted near-certainty position(s)")
+        else:
+            self.log(
+                f"Inverted near-certainty inactive this tick | "
+                f"window={len(markets)} price_filtered={price_filtered} "
+                f"profit_filtered={profit_filtered} opportunities={opportunity_count}",
+                level="warning",
+            )

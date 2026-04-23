@@ -24,6 +24,7 @@ DEFAULT_CONFIG = {
     "repeated_error_threshold": 3,
     "recent_loss_streak_threshold": 3,
     "recent_pnl_window": 5,
+    "critical_recent_loss_usdc": 0.25,
 }
 
 
@@ -47,6 +48,7 @@ class AIObserver:
         self.repeated_error_threshold = max(2, int(cfg.get("repeated_error_threshold", 3)))
         self.recent_loss_streak_threshold = max(2, int(cfg.get("recent_loss_streak_threshold", 3)))
         self.recent_pnl_window = max(3, int(cfg.get("recent_pnl_window", 5)))
+        self.critical_recent_loss_usdc = max(0.01, float(cfg.get("critical_recent_loss_usdc", 0.25)))
 
         self._anthropic_client = None
         self._openai_client = None
@@ -173,9 +175,14 @@ class AIObserver:
         if loss_streak < self.recent_loss_streak_threshold and recent_total >= 0:
             return None
 
+        is_critical = (
+            loss_streak >= self.recent_pnl_window
+            or recent_total <= -abs(self.critical_recent_loss_usdc)
+        )
+
         return {
             "category": "pnl",
-            "severity": "warning" if recent_total > -5 else "critical",
+            "severity": "critical" if is_critical else "warning",
             "title": "Recent realized P&L is slipping",
             "summary": (
                 f"Last {len(recent)} closed trades: {recent_wins} win(s), "
@@ -185,6 +192,7 @@ class AIObserver:
             "recommendation": (
                 "Reduce fresh risk until the losing cluster is understood. Review the strategy mix and exit timing before scaling back up."
             ),
+            "recommended_action": "pause" if is_critical else "review",
         }
 
     async def _generate_model_reports(
@@ -233,6 +241,8 @@ class AIObserver:
             "Allowed category values: glitch, pnl.\n"
             "Allowed severity values: info, warning, critical.\n"
             "Allowed recommended_action values: review, pause, restart.\n"
+            "Use recommended_action=pause for critical P&L/loss-streak findings.\n"
+            "Do not flag scheduled countdown or idle logs as stalls when they clearly describe an intentional interval.\n"
             "Focus on concrete anomalies visible in the logs or realized P&L.\n"
             "Do not suggest autonomous code edits, config rewrites, or placing new trades.\n"
             "If nothing looks notable, return [].\n\n"
@@ -355,6 +365,8 @@ class AIObserver:
                 recommended_action = "review"
             else:
                 recommended_action = "review"
+        elif category == "pnl" and severity == "critical":
+            recommended_action = "pause"
 
         title = str(report.get("title") or "AI observer note").strip()[:100]
         summary = str(report.get("summary") or "").strip()[:280]

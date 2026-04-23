@@ -38,11 +38,21 @@ class NearCertaintyStrategy(BaseStrategy):
         )
 
         if not markets:
-            self.log("No active markets found")
+            stats = await self.market_data.get_resolution_window_stats(max_hours)
+            self.log(
+                f"No candidate markets within {max_hours}h | "
+                f"active={stats['active_markets']} "
+                f"with_time={stats['with_resolution_time']} "
+                f"missing_time={stats['missing_resolution_time']}",
+                level="warning",
+            )
             return
 
         self.log(f"Scanning {len(markets)} markets for near-certainty YES (price>=${min_price})")
         entered = 0
+        price_filtered = 0
+        profit_filtered = 0
+        opportunity_count = 0
 
         # Batch-fetch all BBOs in parallel up front. Previously this loop did
         # ~500 sequential awaits per tick, which could take longer than the
@@ -67,16 +77,19 @@ class NearCertaintyStrategy(BaseStrategy):
                 continue
 
             if best_bid < min_price:
+                price_filtered += 1
                 continue
 
             # Fee-aware profitability check (use mid for fee calc)
             net_profit_pct = fees.net_profit_pct_near_certainty(mid)
             if net_profit_pct < min_net_return:
+                profit_filtered += 1
                 self.log(f"Skipping {slug}: net return {net_profit_pct:.2f}% < {min_net_return}% minimum")
                 continue
 
             hours_left = self.market_data._hours_to_resolution(market)
             fee_cost   = fees.taker_fee_per_share(mid)
+            opportunity_count += 1
 
             self.log(
                 f"Opportunity: {question[:55]} | "
@@ -134,3 +147,10 @@ class NearCertaintyStrategy(BaseStrategy):
 
         if entered:
             self.log(f"Entered {entered} near-certainty position(s) this tick")
+        else:
+            self.log(
+                f"Near-certainty inactive this tick | "
+                f"window={len(markets)} price_filtered={price_filtered} "
+                f"profit_filtered={profit_filtered} opportunities={opportunity_count}",
+                level="warning",
+            )

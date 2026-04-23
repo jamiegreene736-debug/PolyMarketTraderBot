@@ -170,6 +170,29 @@ class MarketData:
         await db.log_to_db("INFO", msg)
         return result
 
+    async def get_resolution_window_stats(self, max_hours: float) -> dict:
+        markets = await self.get_markets()
+        no_time = 0
+        with_time = 0
+        within_window = 0
+
+        for m in markets:
+            hours_left = self._hours_to_resolution(m)
+            if hours_left is None:
+                no_time += 1
+                continue
+            with_time += 1
+            if 0 < hours_left <= max_hours:
+                within_window += 1
+
+        return {
+            "active_markets": len(markets),
+            "with_resolution_time": with_time,
+            "missing_resolution_time": no_time,
+            "within_window": within_window,
+            "max_hours": max_hours,
+        }
+
     async def get_grouped_markets(self) -> dict[str, list]:
         """
         For Polymarket.us, multi-outcome markets have multiple entries in

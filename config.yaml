@@ -18,6 +18,7 @@ ai_observer:
   repeated_error_threshold: 3
   recent_loss_streak_threshold: 3
   recent_pnl_window: 5
+  critical_recent_loss_usdc: 0.25
 
 capital:
   reserve_pct: 10
@@ -26,6 +27,8 @@ circuit_breaker:
   max_daily_loss_usdc: 7         # $7 max daily loss (~20% of $36 balance — aggressive circuit breaker)
   max_drawdown_pct: 0.20         # Stop if down more than 20% from session-start balance (~$2.40 on $12)
   max_consecutive_losses: 5      # Stop after 5 straight losing trades
+  max_recent_loss_usdc: 0.25     # Small-account guard: stop if recent closed-trade cluster loses 25c
+  recent_loss_window: 5          # Evaluate the last 5 closed trades for clustered churn
   max_orders_per_minute: 15      # Runaway loop guard — halt if >15 orders placed in 60s
 
 strategies:
@@ -78,6 +81,7 @@ strategies:
     max_market_price: 0.90
     max_markets_per_run: 8           # Analyse max 8 markets per hour (API cost control)
     run_interval_seconds: 3600       # Run every 60 minutes
+    wait_log_interval_seconds: 300   # Log scheduled idle countdown at most every 5 min
     cache_ttl_seconds: 7200          # Cache AI estimates for 2 hours
     model: claude-haiku-4-5-20251001
     use_kelly_sizing: true
