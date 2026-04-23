@@ -76,21 +76,47 @@ async def main():
     logger.info(f"Dry run mode: {bot_cfg.get('dry_run', True)}")
     logger.info("=" * 50)
 
-    key_id = os.getenv("POLYMARKET_KEY_ID")
-    secret_key = os.getenv("POLYMARKET_SECRET_KEY")
+    api_key = os.getenv("POLY_API_KEY", "").strip()
+    api_secret = os.getenv("POLY_API_SECRET", "").strip()
+    api_passphrase = os.getenv("POLY_API_PASSPHRASE", "").strip()
+    private_key = os.getenv("POLY_PRIVATE_KEY", "").strip()
+    funder_address = os.getenv("POLY_FUNDER_ADDRESS", "").strip()
+    signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE", "").strip()
+    signature_type = None
+    if signature_type_raw:
+        try:
+            signature_type = int(signature_type_raw)
+        except ValueError:
+            logger.warning(f"Invalid POLY_SIGNATURE_TYPE={signature_type_raw!r}; using auto-detect")
 
-    if not key_id or not secret_key:
-        logger.error("Missing POLYMARKET_KEY_ID or POLYMARKET_SECRET_KEY in environment")
+    if not api_key or not api_secret or not api_passphrase or not private_key:
+        missing = [
+            name
+            for name, value in {
+                "POLY_API_KEY": api_key,
+                "POLY_API_SECRET": api_secret,
+                "POLY_API_PASSPHRASE": api_passphrase,
+                "POLY_PRIVATE_KEY": private_key,
+            }.items()
+            if not value
+        ]
+        logger.error(f"Missing Polymarket env vars: {', '.join(missing)}")
         sys.exit(1)
 
     await db.init_db()
 
     client = PolymarketClient(
-        key_id=key_id,
-        secret_key=secret_key,
+        api_key=api_key,
+        api_secret=api_secret,
+        api_passphrase=api_passphrase,
+        private_key=private_key,
+        funder_address=funder_address,
+        signature_type=signature_type,
         dry_run=bot_cfg.get("dry_run", True),
     )
     await client.connect()
+    if not bot_cfg.get("dry_run", True) and client.signature_type == 0:
+        await client.setup_allowances()
 
     market_data = MarketData(client)
     order_manager = OrderManager(client, max_concurrent=bot_cfg.get("max_concurrent_orders", 20))

@@ -460,8 +460,10 @@ import signal
 
 env = os.environ.copy()
 env["DASHBOARD_PASSWORD"] = "testpass"
-env["POLYMARKET_KEY_ID"] = "fake-key-id"
-env["POLYMARKET_SECRET_KEY"] = "ZmFrZS1zZWNyZXQ="   # base64 "fake-secret"
+env["POLY_API_KEY"] = "fake-api-key"
+env["POLY_API_SECRET"] = "fake-api-secret"
+env["POLY_API_PASSPHRASE"] = "fake-passphrase"
+env["POLY_PRIVATE_KEY"] = "0x" + "11" * 32
 env["NEWS_API_KEY"] = "fake-news-key"
 env["ANTHROPIC_API_KEY"] = "sk-ant-fake"
 env["OPENAI_API_KEY"] = "sk-fake-openai"

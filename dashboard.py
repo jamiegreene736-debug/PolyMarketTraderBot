@@ -74,6 +74,13 @@ async def run_bot_loop():
     api_passphrase  = os.getenv("POLY_API_PASSPHRASE", "").strip()
     private_key     = os.getenv("POLY_PRIVATE_KEY", "").strip()
     funder_address  = os.getenv("POLY_FUNDER_ADDRESS", "").strip()
+    signature_type_raw = os.getenv("POLY_SIGNATURE_TYPE", "").strip()
+    signature_type = None
+    if signature_type_raw:
+        try:
+            signature_type = int(signature_type_raw)
+        except ValueError:
+            logger.warning(f"Invalid POLY_SIGNATURE_TYPE={signature_type_raw!r}; using auto-detect")
 
     if not api_key or not api_secret or not api_passphrase or not private_key:
         missing = [k for k, v in {
@@ -92,13 +99,23 @@ async def run_bot_loop():
         api_secret     = api_secret,
         api_passphrase = api_passphrase,
         private_key    = private_key,
+        funder_address = funder_address,
+        signature_type = signature_type,
         dry_run        = bot_cfg.get("dry_run", False),
     )
     await client.connect()
 
-    # Set ERC-20 spending approvals for the CLOB exchange contracts so the
-    # EOA signer can place orders once USDC arrives at the signer address.
-    if not bot_cfg.get("dry_run", False):
+    await db.log_to_db(
+        "INFO",
+        "CLOB auth: "
+        f"signer={client.signer_address or 'unknown'} "
+        f"funder={client.funder_address or 'EOA signer wallet'} "
+        f"sig_type={client.signature_type}"
+    )
+
+    # Proxy-wallet accounts already have their allowances managed by
+    # Polymarket. Direct EOAs need approvals on first live startup.
+    if not bot_cfg.get("dry_run", False) and client.signature_type == 0:
         await client.setup_allowances()
 
     market_data = MarketData(client)

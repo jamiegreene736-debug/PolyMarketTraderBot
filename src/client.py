@@ -20,7 +20,6 @@ all strategies, order_manager, and market_data work without changes.
 
 import asyncio
 import json
-import os
 import httpx
 from loguru import logger
 from py_clob_client.client import ClobClient
@@ -32,6 +31,9 @@ from py_clob_client.order_builder.constants import BUY
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
 CHAIN_ID  = 137  # Polygon mainnet
+SIG_TYPE_EOA = 0
+SIG_TYPE_POLY_PROXY = 1
+SIG_TYPE_POLY_GNOSIS_SAFE = 2
 
 
 class PolymarketClient:
@@ -42,13 +44,17 @@ class PolymarketClient:
     """
 
     def __init__(self, api_key: str, api_secret: str, api_passphrase: str,
-                 private_key: str, funder_address: str = "", dry_run: bool = False):
+                 private_key: str, funder_address: str = "", signature_type: int | None = None,
+                 dry_run: bool = False):
         self.api_key        = api_key
         self.api_secret     = api_secret
         self.api_passphrase = api_passphrase
         self.private_key    = private_key
         self.funder_address = funder_address  # Gnosis Safe / proxy wallet that holds USDC
+        self.configured_signature_type = signature_type
         self.dry_run        = dry_run
+        self.signature_type = SIG_TYPE_EOA
+        self.signer_address = ""
         self._client: ClobClient | None = None
 
         # py-clob-client (requests) picks up HTTPS_PROXY env var automatically,
@@ -65,20 +71,222 @@ class PolymarketClient:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
+    async def _build_client(
+        self,
+        creds: ApiCreds,
+        signature_type: int | None = None,
+        funder: str | None = None,
+    ) -> ClobClient:
+        return await asyncio.to_thread(
+            ClobClient,
+            CLOB_HOST,
+            chain_id=CHAIN_ID,
+            key=self.private_key,
+            creds=creds,
+            signature_type=signature_type,
+            funder=funder,
+        )
+
+    def _extract_balance_usdc(self, raw: dict | None) -> float:
+        if not isinstance(raw, dict):
+            return 0.0
+
+        bal_raw = None
+        for key in ("balance", "availableBalance", "USDC", "usdc", "collateral"):
+            value = raw.get(key)
+            if value is None:
+                continue
+            try:
+                bal_raw = float(value)
+                break
+            except (TypeError, ValueError):
+                continue
+
+        if bal_raw is None:
+            return 0.0
+
+        return bal_raw / 1_000_000 if bal_raw >= 100_000 else bal_raw
+
+    def _extract_proxy_address(self, raw: dict | None) -> str:
+        if not isinstance(raw, dict):
+            return ""
+
+        for key in (
+            "proxyWallet",
+            "proxy_wallet",
+            "proxyAddress",
+            "funder",
+            "makerAddress",
+            "maker_address",
+            "walletAddress",
+            "address",
+        ):
+            value = raw.get(key)
+            if isinstance(value, str) and value.startswith("0x"):
+                return value
+
+        return ""
+
+    def _sig_label(self, signature_type: int) -> str:
+        return {
+            SIG_TYPE_EOA: "EOA",
+            SIG_TYPE_POLY_PROXY: "POLY_PROXY",
+            SIG_TYPE_POLY_GNOSIS_SAFE: "POLY_GNOSIS_SAFE",
+        }.get(signature_type, f"UNKNOWN({signature_type})")
+
     async def connect(self):
         creds = ApiCreds(
             api_key        = self.api_key,
             api_secret     = self.api_secret,
             api_passphrase = self.api_passphrase,
         )
-        self._client = await asyncio.to_thread(
-            ClobClient,
-            CLOB_HOST,
-            chain_id = CHAIN_ID,
-            key      = self.private_key,
-            creds    = creds,
+
+        effective_funder = self.funder_address.strip()
+        preferred_sig_type = self.configured_signature_type
+
+        if effective_funder and preferred_sig_type is not None:
+            self._client = await self._build_client(
+                creds,
+                signature_type=preferred_sig_type,
+                funder=effective_funder,
+            )
+            self.signature_type = preferred_sig_type
+            self.funder_address = effective_funder
+            self.signer_address = self._client.get_address() or ""
+            logger.info(
+                "Polymarket CLOB client connected "
+                f"(dry_run={self.dry_run}, mode={self._sig_label(self.signature_type)}, "
+                f"signer={self.signer_address}, funder={self.funder_address})"
+            )
+            return
+
+        probe_client = await self._build_client(creds)
+        self.signer_address = probe_client.get_address() or ""
+
+        candidates: list[tuple[float, int, str]] = []
+        for stype in (
+            SIG_TYPE_EOA,
+            SIG_TYPE_POLY_PROXY,
+            SIG_TYPE_POLY_GNOSIS_SAFE,
+        ):
+            try:
+                raw = await asyncio.to_thread(
+                    probe_client.get_balance_allowance,
+                    BalanceAllowanceParams(
+                        asset_type=AssetType.COLLATERAL,
+                        signature_type=stype,
+                    ),
+                )
+                logger.info(
+                    f"CLOB balance probe sig_type={stype} ({self._sig_label(stype)}): {raw}"
+                )
+                discovered = self._extract_proxy_address(raw)
+                balance = self._extract_balance_usdc(raw)
+
+                if stype == SIG_TYPE_EOA:
+                    candidates.append((balance, stype, self.signer_address))
+                elif discovered:
+                    candidates.append((balance, stype, discovered))
+                elif effective_funder:
+                    candidates.append((balance, stype, effective_funder))
+            except Exception as e:
+                logger.warning(
+                    f"CLOB balance probe sig_type={stype} ({self._sig_label(stype)}) failed: {e}"
+                )
+
+        if not effective_funder:
+            try:
+                api_keys_resp = await asyncio.to_thread(probe_client.get_api_keys)
+                logger.info(f"CLOB get_api_keys raw: {api_keys_resp}")
+                discovered = self._extract_proxy_address(api_keys_resp)
+                if discovered:
+                    effective_funder = discovered
+                    for stype in (SIG_TYPE_POLY_PROXY, SIG_TYPE_POLY_GNOSIS_SAFE):
+                        candidates.append((0.0, stype, discovered))
+            except Exception as e:
+                logger.warning(f"CLOB get_api_keys failed: {e}")
+
+        if preferred_sig_type is None and effective_funder:
+            # If the user supplied a funder but not a type, prefer Gnosis Safe
+            # first because Polymarket's docs call it the common path for newer
+            # proxy-backed accounts.
+            candidates.append((0.0, SIG_TYPE_POLY_GNOSIS_SAFE, effective_funder))
+            candidates.append((0.0, SIG_TYPE_POLY_PROXY, effective_funder))
+
+        if effective_funder:
+            trial_types = (
+                [preferred_sig_type]
+                if preferred_sig_type is not None
+                else [SIG_TYPE_POLY_GNOSIS_SAFE, SIG_TYPE_POLY_PROXY]
+            )
+            for stype in trial_types:
+                if stype is None or stype == SIG_TYPE_EOA:
+                    continue
+                try:
+                    funded_client = await self._build_client(
+                        creds,
+                        signature_type=stype,
+                        funder=effective_funder,
+                    )
+                    raw = await asyncio.to_thread(
+                        funded_client.get_balance_allowance,
+                        BalanceAllowanceParams(
+                            asset_type=AssetType.COLLATERAL,
+                            signature_type=stype,
+                        ),
+                    )
+                    balance = self._extract_balance_usdc(raw)
+                    logger.info(
+                        "CLOB funded probe "
+                        f"sig_type={stype} ({self._sig_label(stype)}) "
+                        f"funder={effective_funder}: {raw}"
+                    )
+                    candidates.append((balance, stype, effective_funder))
+                except Exception as e:
+                    logger.warning(
+                        "CLOB funded probe failed "
+                        f"sig_type={stype} ({self._sig_label(stype)}) "
+                        f"funder={effective_funder}: {e}"
+                    )
+
+        if candidates:
+            # Highest observed balance wins. For balance ties, prefer the more
+            # modern proxy-safe path, then proxy, then EOA.
+            balance, chosen_sig_type, chosen_funder = max(
+                candidates,
+                key=lambda item: (
+                    item[0],
+                    2 if item[1] == SIG_TYPE_POLY_GNOSIS_SAFE else 1 if item[1] == SIG_TYPE_POLY_PROXY else 0,
+                ),
+            )
+            if chosen_sig_type == SIG_TYPE_EOA:
+                self._client = probe_client
+                self.signature_type = SIG_TYPE_EOA
+                self.funder_address = ""
+            else:
+                self._client = await self._build_client(
+                    creds,
+                    signature_type=chosen_sig_type,
+                    funder=chosen_funder,
+                )
+                self.signature_type = chosen_sig_type
+                self.funder_address = chosen_funder
+            self.signer_address = self._client.get_address() or self.signer_address
+            logger.info(
+                "Polymarket CLOB client connected "
+                f"(dry_run={self.dry_run}, mode={self._sig_label(self.signature_type)}, "
+                f"signer={self.signer_address}, funder={self.funder_address or self.signer_address}, "
+                f"observed_balance=${balance:.2f})"
+            )
+            return
+
+        self._client = probe_client
+        self.signature_type = SIG_TYPE_EOA
+        self.funder_address = ""
+        logger.info(
+            "Polymarket CLOB client connected "
+            f"(dry_run={self.dry_run}, mode=EOA, signer={self.signer_address})"
         )
-        logger.info(f"Polymarket CLOB client connected (dry_run={self.dry_run}, EOA mode)")
 
     async def setup_allowances(self):
         """
@@ -89,16 +297,32 @@ class PolymarketClient:
         try:
             await asyncio.to_thread(
                 self._client.update_balance_allowance,
-                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
+                BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self.signature_type,
+                ),
             )
-            logger.info("CLOB allowance set: COLLATERAL (USDC)")
+            logger.info(
+                "CLOB collateral balance/allowance refreshed "
+                f"(sig_type={self.signature_type}, funder={self.funder_address or self.signer_address})"
+            )
         except Exception as e:
             logger.warning(f"setup_allowances (COLLATERAL) failed: {e}")
+
+        if self.signature_type != SIG_TYPE_EOA:
+            logger.info(
+                "Skipping CONDITIONAL allowance update in proxy-wallet mode; "
+                "Polymarket manages token approvals for the funded wallet"
+            )
+            return
 
         try:
             await asyncio.to_thread(
                 self._client.update_balance_allowance,
-                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL),
+                BalanceAllowanceParams(
+                    asset_type=AssetType.CONDITIONAL,
+                    signature_type=self.signature_type,
+                ),
             )
             logger.info("CLOB allowance set: CONDITIONAL (CTF tokens)")
         except Exception as e:
@@ -317,36 +541,45 @@ class PolymarketClient:
         e.g. {"balance": "36000000.0", "allowance": "..."} → $36.00
         """
         try:
+            # Polymarket documents getBalanceAllowance as a cached value. Refresh
+            # the collateral snapshot first so proxy-wallet balances do not stay at 0.
+            try:
+                await asyncio.to_thread(
+                    self._client.update_balance_allowance,
+                    BalanceAllowanceParams(
+                        asset_type=AssetType.COLLATERAL,
+                        signature_type=self.signature_type,
+                    ),
+                )
+            except Exception as refresh_error:
+                logger.warning(f"get_balance refresh failed: {refresh_error}")
+
             raw = await asyncio.to_thread(
                 self._client.get_balance_allowance,
-                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
+                BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=self.signature_type,
+                ),
             )
             # Log raw on first call so we can see the exact shape
-            logger.info(f"get_balance raw response: {raw}")
+            logger.info(
+                f"get_balance raw response (sig_type={self.signature_type}): {raw}"
+            )
 
             if not isinstance(raw, dict):
                 logger.warning(f"get_balance: unexpected response type {type(raw)}: {raw}")
                 return {"balance": 0.0, "availableBalance": 0.0}
 
-            # Try known key names
-            bal_raw = None
-            for key in ("balance", "availableBalance", "USDC", "usdc", "collateral"):
-                v = raw.get(key)
-                if v is not None:
-                    try:
-                        bal_raw = float(v)
-                        break
-                    except (TypeError, ValueError):
-                        pass
-
-            if bal_raw is None:
+            has_balance_key = any(
+                raw.get(key) is not None
+                for key in ("balance", "availableBalance", "USDC", "usdc", "collateral")
+            )
+            if not has_balance_key:
                 logger.warning(f"get_balance: no balance key found in {list(raw.keys())}")
                 return {"balance": 0.0, "availableBalance": 0.0}
 
-            # Polymarket returns micro-USDC (6 decimals): 36000000 → $36.00
-            # Guard: if < 100000 it's already dollar-denominated
-            bal = bal_raw / 1_000_000 if bal_raw >= 100_000 else bal_raw
-            logger.info(f"get_balance: raw={bal_raw} → ${bal:.2f} USDC")
+            bal = self._extract_balance_usdc(raw)
+            logger.info(f"get_balance: ${bal:.2f} USDC")
             return {"balance": bal, "availableBalance": bal}
         except Exception as e:
             logger.warning(f"get_balance failed: {e}")
