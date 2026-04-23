@@ -332,11 +332,10 @@ class PositionMonitorStrategy(BaseStrategy):
             )
 
             if oid:
-                if order_id:
-                    await db.cancel_trade(order_id)
-                await self.order_manager.mark_filled(oid, pnl=pnl_est)
-                # Done with this position — clear any exit-attempt state.
-                self._exit_attempts.pop(order_id, None)
+                self.log(
+                    f"Exit order posted for {slug} ({trigger}) — waiting for actual fill before "
+                    f"counting realized P&L"
+                )
                 exits += 1
             else:
                 self.log(f"Exit order failed for {slug} — position stays open", level="warning")

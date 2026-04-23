@@ -236,10 +236,12 @@ async def run_bot_loop():
                                 # keeping the override prevents a false circuit-breaker trip.
                                 if balance > 0:
                                     capital.update_balance(balance)
-                                # Fetch real realized PnL for the chart
+                                # Snapshot against exchange-truth realized P&L, not local
+                                # placeholder close rows from earlier buggy exit paths.
                                 try:
-                                    stats_snap = await db.get_dashboard_stats()
-                                    realized_pnl = stats_snap.get("total_pnl", 0.0)
+                                    realized_pnl = _live_closed_summary(
+                                        await _get_live_closed_positions(limit=150)
+                                    ).get("total_pnl", 0.0)
                                 except Exception:
                                     realized_pnl = 0.0
                                 await db.snapshot_balance(balance, realized_pnl, 0.0)
@@ -255,7 +257,14 @@ async def run_bot_loop():
                 balance_refresh_counter += 1
 
                 # ── Circuit breaker check ─────────────────────────────────
-                recent_pnls = await db.get_recent_closed_pnls(limit=20)
+                try:
+                    recent_closed = await _get_live_closed_positions(limit=20)
+                    recent_pnls = [
+                        _safe_float(pos.get("realizedPnl"))
+                        for pos in recent_closed
+                    ]
+                except Exception:
+                    recent_pnls = []
                 cb_safe = await _circuit_breaker.check(capital.total_usdc, recent_pnls)
                 if not cb_safe:
                     _bot_state["status"] = "error"
@@ -495,6 +504,27 @@ async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
     return positions
 
 
+def _live_closed_summary(closed_positions: list[dict]) -> dict:
+    realized_pnl = round(sum(_safe_float(p.get("realizedPnl")) for p in closed_positions), 2)
+    wins = sum(1 for p in closed_positions if _safe_float(p.get("realizedPnl")) > 0)
+    total_closed = len(closed_positions)
+    win_rate = round((wins / total_closed) * 100, 1) if total_closed else 0.0
+    today = datetime.utcnow().date().isoformat()
+    trades_today = sum(
+        1
+        for p in closed_positions
+        if (_iso_from_polymarket_timestamp(p.get("timestamp")) or "").startswith(today)
+    )
+    return {
+        "total_pnl": realized_pnl,
+        "win_rate": win_rate,
+        "wins": wins,
+        "total_closed": total_closed,
+        "total_trades": total_closed,
+        "trades_today": trades_today,
+    }
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -503,6 +533,10 @@ async def dashboard(_=Depends(verify_password)):
     if _client_ref is not None:
         try:
             stats["open_positions"] = len(await _client_ref.get_positions())
+        except Exception:
+            pass
+        try:
+            stats.update(_live_closed_summary(await _get_live_closed_positions(limit=150)))
         except Exception:
             pass
     template = jinja_env.get_template("index.html")
@@ -516,6 +550,10 @@ async def api_stats(_=Depends(verify_password)):
     if _client_ref is not None:
         try:
             stats["open_positions"] = len(await _client_ref.get_positions())
+        except Exception:
+            pass
+        try:
+            stats.update(_live_closed_summary(await _get_live_closed_positions(limit=150)))
         except Exception:
             pass
     return stats
@@ -900,7 +938,10 @@ async def api_closed_trades(_=Depends(verify_password)):
         })
 
     local_cancelled = [row for row in status_rows if row.get("status") == "cancelled"]
-    closed = live_closed_rows or [row for row in status_rows if row.get("status") == "closed"]
+    # Closed-trade reporting should follow exchange truth. Historical local
+    # "closed" rows may represent posted exit attempts, not actual realized
+    # fills, so we do not use them for P&L cards or win-rate stats.
+    closed = live_closed_rows
     all_trades = sorted(
         [*closed, *local_cancelled],
         key=_trade_sort_key,
