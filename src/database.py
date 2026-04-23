@@ -178,12 +178,22 @@ async def log_to_db(level: str, message: str):
         await db.commit()
 
 
-async def get_recent_logs(limit: int = 100, exclude_prefix: str | None = None) -> list[dict]:
+async def get_recent_logs(
+    limit: int = 100,
+    exclude_prefix: str | None = None,
+    since_timestamp: str | None = None,
+) -> list[dict]:
     query = "SELECT timestamp, level, message FROM bot_logs"
+    clauses = []
     params: list = []
     if exclude_prefix:
-        query += " WHERE message NOT LIKE ?"
+        clauses.append("message NOT LIKE ?")
         params.append(f"{exclude_prefix}%")
+    if since_timestamp:
+        clauses.append("timestamp >= ?")
+        params.append(since_timestamp)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY timestamp DESC LIMIT ?"
     params.append(limit)
 
@@ -256,6 +266,13 @@ async def acknowledge_ai_observer_alerts() -> int:
             """,
             (datetime.utcnow().isoformat(),),
         )
+        await db.commit()
+    return cur.rowcount
+
+
+async def clear_ai_observer_reports() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM ai_observer_reports")
         await db.commit()
     return cur.rowcount
 

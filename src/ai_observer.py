@@ -3,7 +3,7 @@ import hashlib
 import json
 import os
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 
 import anthropic
 from loguru import logger
@@ -63,6 +63,7 @@ class AIObserver:
         bot_status: str,
         last_error: str | None,
         closed_positions: list[dict] | None,
+        session_start_ts: float | None = None,
     ):
         if not self.enabled:
             return
@@ -75,20 +76,32 @@ class AIObserver:
             return
 
         self._last_run = now
+        session_closed = [
+            pos
+            for pos in list(closed_positions or [])
+            if session_start_ts is None or self._closed_position_ts(pos) >= session_start_ts
+        ]
         snapshot = {
             "balance": round(float(balance or 0.0), 2),
             "open_orders": int(open_orders or 0),
             "bot_status": str(bot_status or "unknown"),
             "last_error": str(last_error or "").strip(),
-            "closed_positions": list(closed_positions or []),
+            "closed_positions": session_closed,
+            "session_start_ts": session_start_ts,
         }
         self._analysis_task = asyncio.create_task(self._run_snapshot(snapshot))
 
     async def _run_snapshot(self, snapshot: dict):
         try:
+            since_timestamp = None
+            if snapshot.get("session_start_ts") is not None:
+                since_timestamp = datetime.utcfromtimestamp(
+                    float(snapshot["session_start_ts"])
+                ).isoformat()
             logs = await db.get_recent_logs(
                 limit=self.max_logs,
                 exclude_prefix="[ai_observer]",
+                since_timestamp=since_timestamp,
             )
             heuristic_reports = self._build_heuristic_reports(logs, snapshot)
             reports = heuristic_reports
@@ -419,10 +432,24 @@ class AIObserver:
 
     @staticmethod
     def _closed_position_ts(row: dict) -> float:
-        raw = AIObserver._safe_float(row.get("timestamp"))
+        value = row.get("timestamp") or row.get("resolved_at")
+        raw = AIObserver._safe_float(value)
         if raw > 1_000_000_000_000:
             raw /= 1000.0
-        return raw
+        if raw > 0:
+            return raw
+
+        text = str(value or "").strip()
+        if not text:
+            return 0.0
+
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except ValueError:
+            return 0.0
 
     @staticmethod
     def _safe_float(value) -> float:

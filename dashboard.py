@@ -184,6 +184,10 @@ async def run_bot_loop():
     _capital = capital
     _circuit_breaker = CircuitBreaker(config, start_balance=capital.total_usdc)
     _ai_observer = AIObserver(config.get("ai_observer", {}))
+    cleared_reports = await db.clear_ai_observer_reports()
+    msg = f"AI observer session reset ({cleared_reports} stale report(s) cleared)"
+    logger.info(msg)
+    await db.log_to_db("INFO", msg)
 
     strategies = [
         # Run position monitor FIRST each tick so exits happen before new entries
@@ -314,12 +318,18 @@ async def run_bot_loop():
                         await db.log_to_db("ERROR", msg)
 
                 if _ai_observer is not None:
+                    session_start_ts = (
+                        _circuit_breaker.session_start_at.timestamp()
+                        if _circuit_breaker is not None
+                        else None
+                    )
                     _ai_observer.maybe_schedule(
                         balance=capital.total_usdc,
                         open_orders=order_manager.get_total_open_orders(),
                         bot_status=_bot_state.get("status", "unknown"),
                         last_error=_bot_state.get("last_error"),
                         closed_positions=recent_closed,
+                        session_start_ts=session_start_ts,
                     )
 
                 _bot_state["last_heartbeat"] = datetime.utcnow().isoformat()
