@@ -50,6 +50,14 @@ class CapitalManager:
         current = self._allocated.get(strategy, 0.0)
         self._allocated[strategy] = max(0.0, current - amount)
 
+    def reconcile(self, allocations: dict[str, float]):
+        cleaned = {
+            str(strategy): max(0.0, float(amount))
+            for strategy, amount in allocations.items()
+            if float(amount) > 0
+        }
+        self._allocated = cleaned
+
     def kelly_size(
         self,
         strategy: str,

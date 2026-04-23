@@ -207,6 +207,7 @@ async def run_bot_loop():
     ]
 
     enabled = [s for s in strategies if s.enabled]
+    position_monitor = next((s for s in enabled if s.name == "position_monitor"), None)
     poll_interval = bot_cfg.get("poll_interval_seconds", 30)
     balance_refresh_counter = 0
 
@@ -255,6 +256,14 @@ async def run_bot_loop():
                         await db.log_to_db("WARNING", msg)
 
                 balance_refresh_counter += 1
+
+                if position_monitor is not None:
+                    await _reconcile_live_capital_allocations(
+                        capital=capital,
+                        client=client,
+                        order_manager=order_manager,
+                        position_monitor=position_monitor,
+                    )
 
                 # ── Circuit breaker check ─────────────────────────────────
                 try:
@@ -523,6 +532,71 @@ def _live_closed_summary(closed_positions: list[dict]) -> dict:
         "total_trades": total_closed,
         "trades_today": trades_today,
     }
+
+
+async def _reconcile_live_capital_allocations(
+    capital: CapitalManager,
+    client: PolymarketClient,
+    order_manager: OrderManager,
+    position_monitor: PositionMonitorStrategy,
+):
+    allocations: dict[str, float] = {}
+
+    try:
+        managed_positions = await position_monitor._build_managed_positions()
+    except Exception as e:
+        logger.warning(f"Capital reconciliation: could not load live positions: {e}")
+        managed_positions = []
+
+    for pos in managed_positions:
+        strategy = str(pos.get("strategy") or "").strip()
+        if not strategy or strategy == "position_monitor":
+            continue
+        try:
+            notional = float(pos.get("price") or 0.0) * float(pos.get("quantity") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if notional > 0:
+            allocations[strategy] = allocations.get(strategy, 0.0) + notional
+
+    try:
+        db_meta = await db.get_open_trades_metadata()
+    except Exception:
+        db_meta = {}
+
+    try:
+        raw_orders = await client.get_open_orders()
+    except Exception as e:
+        logger.warning(f"Capital reconciliation: could not load open orders: {e}")
+        raw_orders = []
+
+    for o in raw_orders or []:
+        order_id = str(o.get("id") or o.get("orderId") or o.get("order_id") or "").strip()
+        meta = db_meta.get(order_id, {})
+        strategy = str(meta.get("strategy") or "").strip()
+        if not strategy or strategy == "position_monitor":
+            continue
+
+        execution_side = str(
+            o.get("side") or meta.get("execution_side") or ""
+        ).upper().strip()
+        if execution_side == "SELL":
+            continue
+
+        raw_price = o.get("price", 0)
+        if isinstance(raw_price, dict):
+            raw_price = raw_price.get("value", 0)
+        try:
+            price = float(raw_price or 0.0)
+            quantity = float(o.get("quantity") or o.get("size") or 0.0)
+        except (TypeError, ValueError):
+            continue
+
+        notional = price * quantity
+        if notional > 0:
+            allocations[strategy] = allocations.get(strategy, 0.0) + notional
+
+    capital.reconcile(allocations)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
