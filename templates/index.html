@@ -714,14 +714,19 @@
   // ── Stats Cards ─────────────────────────────────────────────────────────
   async function refreshStats() {
     try {
-      const res  = await fetch('/api/stats');
-      if (!res.ok) return;
-      const d = await res.json();
+      const [statsRes, closedRes] = await Promise.all([
+        fetch('/api/stats'),
+        fetch('/api/closed-trades'),
+      ]);
+      if (!statsRes.ok || !closedRes.ok) return;
+      const d = await statsRes.json();
+      const closedData = await closedRes.json();
+      const summary = closedData.summary || {};
 
       // Total P&L
       const pnlEl = document.getElementById('statTotalPnl');
       if (pnlEl) {
-        const pnl = d.total_pnl || 0;
+        const pnl = summary.realized_pnl ?? d.total_pnl ?? 0;
         pnlEl.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toFixed(2);
         pnlEl.className = 'value ' + (pnl >= 0 ? 'positive' : 'negative');
       }
@@ -730,12 +735,12 @@
       const wrEl  = document.getElementById('statWinRate');
       const wrSub = document.getElementById('statWinRateSub');
       if (wrEl) {
-        const wr = d.win_rate || 0;
+        const wr = summary.win_rate ?? d.win_rate ?? 0;
         wrEl.textContent = wr + '%';
         wrEl.className = 'value ' + (wr >= 50 ? 'positive' : 'negative');
       }
       if (wrSub) {
-        wrSub.textContent = (d.wins || 0) + ' / ' + (d.total_closed || 0) + ' trades';
+        wrSub.textContent = (summary.wins ?? d.wins ?? 0) + ' / ' + (summary.total_closed ?? d.total_closed ?? 0) + ' trades';
       }
 
       // Open Positions
@@ -744,11 +749,35 @@
 
       // Total Trades
       const ttEl = document.getElementById('statTotalTrades');
-      if (ttEl) ttEl.textContent = d.total_trades ?? 0;
+      if (ttEl) ttEl.textContent = summary.total_trades ?? d.total_trades ?? 0;
 
       // Trades Today
       const tdEl = document.getElementById('statTradesToday');
-      if (tdEl) tdEl.textContent = d.trades_today ?? 0;
+      if (tdEl) tdEl.textContent = summary.trades_today ?? d.trades_today ?? 0;
+
+      // Strategy breakdown
+      const strategyPanel = document.querySelector('.panel .panel-body');
+      const strategyHeader = Array.from(document.querySelectorAll('.panel-header'))
+        .find(el => el.textContent.trim() === 'Strategy Breakdown');
+      const strategyBody = strategyHeader ? strategyHeader.nextElementSibling : null;
+      if (strategyBody) {
+        const strategyStats = summary.strategy_stats || [];
+        if (strategyStats.length === 0) {
+          strategyBody.innerHTML = '<p style="color:#475569; text-align:center; padding:40px 0;">No closed trades yet</p>';
+        } else {
+          strategyBody.innerHTML = strategyStats.map(s => `
+            <div class="strategy-row">
+              <div>
+                <div class="strategy-name">${(s.strategy || 'unknown').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</div>
+                <div class="strategy-meta">${s.wins}/${s.total} wins</div>
+              </div>
+              <div class="strategy-pnl ${s.pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">
+                ${s.pnl >= 0 ? '+' : ''}$${Number(s.pnl).toFixed(2)}
+              </div>
+            </div>
+          `).join('');
+        }
+      }
 
       // Also push recent logs from the same fetch
       renderLogs(d.recent_logs || []);
@@ -773,6 +802,7 @@
       if (!res.ok) return;
       const data = await res.json();
       const trades = data.trades || [];
+      const stats = data.summary || {};
       const tbody  = document.getElementById('closedTradesBody');
       const summary = document.getElementById('closedTradesSummary');
 
@@ -782,9 +812,9 @@
         return;
       }
 
-      const totalPnl = trades.filter(t => t.status === 'closed').reduce((s, t) => s + (t.pnl || 0), 0);
-      const wins     = trades.filter(t => t.status === 'closed' && t.pnl > 0).length;
-      const closed   = trades.filter(t => t.status === 'closed').length;
+      const totalPnl = stats.realized_pnl ?? trades.filter(t => t.status === 'closed').reduce((s, t) => s + (t.pnl || 0), 0);
+      const wins     = stats.wins ?? trades.filter(t => t.status === 'closed' && t.pnl > 0).length;
+      const closed   = stats.total_closed ?? trades.filter(t => t.status === 'closed').length;
       summary.textContent = closed > 0
         ? `${closed} closed · ${wins}W/${closed - wins}L · Total P&L: ${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)}`
         : `${trades.length} cancelled`;

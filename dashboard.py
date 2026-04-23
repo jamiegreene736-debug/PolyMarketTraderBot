@@ -570,7 +570,7 @@ async def api_positions(_=Depends(verify_password)):
 
 @app.get("/api/closed-trades")
 async def api_closed_trades(_=Depends(verify_password)):
-    """Return closed and cancelled trades, newest first."""
+    """Return closed/cancelled trades plus summary stats, newest first."""
     async with aiosqlite.connect(db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         async with conn.execute("""
@@ -580,7 +580,63 @@ async def api_closed_trades(_=Depends(verify_password)):
             LIMIT 100
         """) as cur:
             rows = [dict(r) for r in await cur.fetchall()]
-    return {"trades": rows}
+
+        async with conn.execute("""
+            SELECT COUNT(*) AS total
+            FROM trades
+        """) as cur:
+            total_trades = (await cur.fetchone())["total"]
+
+        today = datetime.utcnow().date().isoformat()
+        async with conn.execute("""
+            SELECT COUNT(*) AS total
+            FROM trades
+            WHERE timestamp LIKE ?
+        """, (f"{today}%",)) as cur:
+            trades_today = (await cur.fetchone())["total"]
+
+    closed = [r for r in rows if r.get("status") == "closed"]
+    realized_pnl = round(sum(float(r.get("pnl") or 0.0) for r in closed), 2)
+    wins = sum(1 for r in closed if float(r.get("pnl") or 0.0) > 0)
+    total_closed = len(closed)
+    win_rate = round((wins / total_closed) * 100, 1) if total_closed else 0.0
+
+    strategy_rollup: dict[str, dict] = {}
+    for row in closed:
+        strategy = row.get("strategy") or "unknown"
+        bucket = strategy_rollup.setdefault(strategy, {"strategy": strategy, "pnl": 0.0, "wins": 0, "total": 0})
+        pnl = float(row.get("pnl") or 0.0)
+        bucket["pnl"] += pnl
+        bucket["total"] += 1
+        if pnl > 0:
+            bucket["wins"] += 1
+
+    strategy_stats = sorted(
+        (
+            {
+                "strategy": s["strategy"],
+                "pnl": round(s["pnl"], 2),
+                "wins": s["wins"],
+                "total": s["total"],
+            }
+            for s in strategy_rollup.values()
+        ),
+        key=lambda s: abs(s["pnl"]),
+        reverse=True,
+    )
+
+    return {
+        "trades": rows,
+        "summary": {
+            "realized_pnl": realized_pnl,
+            "wins": wins,
+            "total_closed": total_closed,
+            "win_rate": win_rate,
+            "total_trades": total_trades,
+            "trades_today": trades_today,
+            "strategy_stats": strategy_stats,
+        },
+    }
 
 
 @app.get("/api/circuit-breaker")
