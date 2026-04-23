@@ -139,9 +139,10 @@ class CircuitBreaker:
         Walk from newest → oldest and count the tail of negatives.
         """
         if not recent_pnl_list:
+            self._consecutive_losses = 0
             return
         count = 0
-        for pnl in reversed(recent_pnl_list):
+        for pnl in recent_pnl_list:
             if pnl < 0:
                 count += 1
             else:
