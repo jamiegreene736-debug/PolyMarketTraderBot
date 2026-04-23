@@ -5,6 +5,20 @@ bot:
   max_concurrent_orders: 10         # Scaled for $36 balance — room for ~5 entries + ~5 exits in flight
   log_level: INFO
 
+ai_observer:
+  enabled: true
+  provider: auto                     # Anthropic/OpenAI if configured; otherwise heuristic-only fallback
+  model: claude-haiku-4-5-20251001
+  openai_model: gpt-4o-mini
+  run_interval_seconds: 300          # Advisory scan every 5m, off the critical trading path
+  max_logs: 60
+  max_reports: 2
+  issues_only: true                  # Only escalate when logs/P&L actually look suspicious
+  write_to_logs: true
+  repeated_error_threshold: 3
+  recent_loss_streak_threshold: 3
+  recent_pnl_window: 5
+
 capital:
   reserve_pct: 10
 
@@ -20,7 +34,7 @@ strategies:
     enabled: true
     capital_pct: 30                  # 30% × $36 = $10.80 — room for 2 concurrent $5 trades
     min_price: 0.93
-    max_hours_to_resolution: 720   # 30 days — current markets all resolve months out, 1-week window was too tight
+    max_hours_to_resolution: 168     # 7 days — avoids season futures that churn out on spread/fees
     min_market_volume: 0
     order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
     min_net_return_pct: 1.0
@@ -31,7 +45,7 @@ strategies:
     enabled: true
     capital_pct: 30                  # 30% × $36 = $10.80 — room for 2 concurrent $5 trades
     max_yes_price: 0.07              # YES must be priced below $0.07
-    max_hours_to_resolution: 720   # 30 days — matches near_certainty window expansion
+    max_hours_to_resolution: 168     # 7 days — same guardrail as near_certainty
     min_market_volume: 0
     order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
     min_net_return_pct: 1.0
@@ -120,8 +134,8 @@ strategies:
       whale_tracker: 0.5             # Momentum fades fast — 30 min hard cap
       ai_trader: 1                   # AI edge should realize inside an hour or it's wrong
       logical_arb: 0.5               # Arb gaps close in minutes
-      near_certainty: 1              # Reduced from 4h — recycle capital hourly
-      inverted_near_certainty: 1     # Reduced from 4h — recycle capital hourly
+      near_certainty: 168            # Let bounded near-certainty trades age toward resolution
+      inverted_near_certainty: 168   # Same — avoid 1h forced churn on NO positions
       default: 0.5                   # Nothing sits longer than 30 min
 
   cross_platform_arb:

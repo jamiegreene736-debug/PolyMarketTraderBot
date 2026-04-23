@@ -34,13 +34,11 @@ class InvertedNearCertaintyStrategy(BaseStrategy):
         use_kelly        = self.config.get("use_kelly_sizing", True)
         kelly_frac       = self.config.get("kelly_fraction", 0.25)
 
-        # If max_hours is large (>720), scan all active markets
-        if max_hours >= 720:
-            markets = await self.market_data.get_markets()
-        else:
-            markets = await self.market_data.get_markets_resolving_soon(
-                max_hours=max_hours, min_volume=min_volume
-            )
+        # Always respect the configured resolution cutoff. Long-dated NO
+        # futures look "safe" but become churn losses if we force-exit them.
+        markets = await self.market_data.get_markets_resolving_soon(
+            max_hours=max_hours, min_volume=min_volume
+        )
 
         if not markets:
             self.log("No active markets found")

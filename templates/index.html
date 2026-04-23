@@ -207,6 +207,49 @@
     .log-ERROR   { color: #f87171; }
     .log-time    { color: #475569; margin-right: 8px; }
 
+    /* ── AI Watch ── */
+    .ai-watch-list {
+      display: grid;
+      gap: 12px;
+    }
+    .ai-watch-item {
+      background: #0d0f14;
+      border: 1px solid #1e2433;
+      border-left-width: 4px;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .ai-watch-item.info { border-left-color: #60a5fa; }
+    .ai-watch-item.warning { border-left-color: #f59e0b; }
+    .ai-watch-item.critical { border-left-color: #ef4444; }
+    .ai-watch-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+      align-items: center;
+    }
+    .ai-watch-title {
+      font-weight: 700;
+      color: #f8fafc;
+    }
+    .ai-watch-meta {
+      font-size: 11px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .ai-watch-summary {
+      color: #cbd5e1;
+      line-height: 1.5;
+      margin-bottom: 6px;
+    }
+    .ai-watch-rec {
+      color: #94a3b8;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
     /* ── Chart ── */
     .chart-container { position: relative; height: 200px; }
 
@@ -275,6 +318,66 @@
     }
     #cb-banner .btn-reset-cb:hover { background: #ef4444; color: #fff; }
 
+    /* ── AI Alert Banner ── */
+    #ai-alert-banner {
+      display: none;
+      background: #1f1726;
+      border: 1px solid #7c3aed;
+      border-radius: 12px;
+      padding: 16px 24px;
+      margin-bottom: 20px;
+      gap: 16px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    #ai-alert-banner.active { display: flex; }
+    #ai-alert-banner.warning {
+      background: #2b2110;
+      border-color: #f59e0b;
+    }
+    #ai-alert-banner.critical {
+      background: #2d1a1a;
+      border-color: #ef4444;
+    }
+    .ai-alert-text { flex: 1; }
+    .ai-alert-title {
+      color: #f8fafc;
+      font-weight: 700;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }
+    .ai-alert-summary {
+      color: #cbd5e1;
+      font-size: 12px;
+      line-height: 1.45;
+      margin-bottom: 4px;
+    }
+    .ai-alert-rec {
+      color: #94a3b8;
+      font-size: 12px;
+    }
+    .ai-alert-actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-shrink: 0;
+    }
+    .btn-ai-alert {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #475569;
+      background: transparent;
+      color: #e2e8f0;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn-ai-alert:hover { filter: brightness(1.1); }
+    .btn-ai-pause {
+      border-color: #ef4444;
+      color: #fca5a5;
+    }
+
     /* ── Toast ── */
     #toast {
       position: fixed; bottom: 24px; right: 24px;
@@ -317,6 +420,18 @@
       <div class="cb-reason" id="cb-reason">—</div>
     </div>
     <button class="btn-reset-cb" onclick="resetCircuitBreaker()">Reset &amp; Resume</button>
+  </div>
+
+  <div id="ai-alert-banner">
+    <div class="ai-alert-text">
+      <div class="ai-alert-title" id="aiAlertTitle">AI attention needed</div>
+      <div class="ai-alert-summary" id="aiAlertSummary">—</div>
+      <div class="ai-alert-rec" id="aiAlertRecommendation">—</div>
+    </div>
+    <div class="ai-alert-actions">
+      <button class="btn-ai-alert btn-ai-pause" id="aiPauseBtn" onclick="pauseFromAiAlert()" style="display:none;">Pause Bot</button>
+      <button class="btn-ai-alert" onclick="acknowledgeAiAlert()">Acknowledge</button>
+    </div>
   </div>
 
   <!-- Balance Bar -->
@@ -456,6 +571,35 @@
   </div>
 
   <!-- Bot Logs -->
+  <div class="panel full-row">
+    <div class="panel-header">AI Watch</div>
+    <div class="panel-body">
+      <div id="aiWatchContainer" class="ai-watch-list">
+        {% if ai_reports %}
+          {% for report in ai_reports %}
+          <div class="ai-watch-item {{ report.severity }}">
+            <div class="ai-watch-top">
+              <div class="ai-watch-title">{{ report.title }}</div>
+              <div class="ai-watch-meta">{{ report.category }} · {{ report.severity }}</div>
+            </div>
+            <div class="ai-watch-summary">{{ report.summary }}</div>
+            <div class="ai-watch-rec">Action: {{ report.recommended_action }} · Next step: {{ report.recommendation }}</div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="ai-watch-item info">
+            <div class="ai-watch-top">
+              <div class="ai-watch-title">Observer idle</div>
+              <div class="ai-watch-meta">awaiting signal</div>
+            </div>
+            <div class="ai-watch-summary">The advisory watcher will post here when logs or realized P&amp;L look abnormal.</div>
+            <div class="ai-watch-rec">It is read-only by design, so it cannot place trades or silently change settings.</div>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
   <div class="panel full-row">
     <div class="panel-header" style="display:flex; justify-content:space-between; align-items:center;">
       <span>Bot Logs <span id="logAge" style="font-size:11px; color:#475569; font-weight:400; margin-left:8px;"></span></span>
@@ -735,6 +879,11 @@
 
   const cbBanner = document.getElementById('cb-banner');
   const cbReason = document.getElementById('cb-reason');
+  const aiAlertBanner = document.getElementById('ai-alert-banner');
+  const aiAlertTitle = document.getElementById('aiAlertTitle');
+  const aiAlertSummary = document.getElementById('aiAlertSummary');
+  const aiAlertRecommendation = document.getElementById('aiAlertRecommendation');
+  const aiPauseBtn = document.getElementById('aiPauseBtn');
 
   async function pollCircuitBreaker() {
     try {
@@ -748,6 +897,49 @@
         cbBanner.classList.remove('active');
       }
     } catch (e) { /* silent fail */ }
+  }
+
+  function renderAiAlert(alert) {
+    if (!aiAlertBanner) return;
+    if (!alert || !alert.active) {
+      aiAlertBanner.className = '';
+      aiAlertBanner.style.display = 'none';
+      return;
+    }
+
+    aiAlertBanner.style.display = 'flex';
+    aiAlertBanner.className = 'active ' + (alert.severity || 'warning');
+    aiAlertTitle.textContent = `${(alert.severity || 'warning').toUpperCase()}: ${alert.title || 'AI attention needed'}`;
+    aiAlertSummary.textContent = alert.summary || 'The observer found something worth reviewing.';
+    aiAlertRecommendation.textContent = `Recommended action: ${alert.recommended_action || 'review'} · ${alert.recommendation || ''}`;
+    aiPauseBtn.style.display = alert.pause_recommended ? 'inline-block' : 'none';
+  }
+
+  async function acknowledgeAiAlert() {
+    try {
+      const res = await fetch('/api/ai-alerts/acknowledge', { method: 'POST' });
+      if (!res.ok) throw new Error('Acknowledge failed');
+      renderAiAlert(null);
+      showToast('AI alert acknowledged', 'success');
+      await refreshStats();
+    } catch (e) {
+      showToast('Could not acknowledge alert', 'error');
+    }
+  }
+
+  async function pauseFromAiAlert() {
+    if (!confirm('Pause the bot now and acknowledge this AI alert?')) return;
+    try {
+      const res = await fetch('/api/stop', { method: 'POST' });
+      if (!res.ok) throw new Error('Stop failed');
+      await fetch('/api/ai-alerts/acknowledge', { method: 'POST' });
+      applyStatus('stopped');
+      renderAiAlert(null);
+      showToast('Bot paused for review', 'success');
+      await refreshStats();
+    } catch (e) {
+      showToast('Could not pause bot', 'error');
+    }
   }
 
   async function resetCircuitBreaker() {
@@ -769,6 +961,7 @@
   const logContainer  = document.getElementById('logContainer');
   const logPlaceholder = document.getElementById('logPlaceholder');
   const logAge        = document.getElementById('logAge');
+  const aiWatchContainer = document.getElementById('aiWatchContainer');
   let lastLogCount    = 0;
 
   function renderLogs(logs) {
@@ -798,6 +991,33 @@
       const age = Math.round((Date.now() - new Date(newest.timestamp + 'Z').getTime()) / 1000);
       logAge.textContent = age < 5 ? '● live' : `updated ${age}s ago`;
     }
+  }
+
+  function renderAiReports(reports) {
+    if (!aiWatchContainer) return;
+    if (!reports || reports.length === 0) {
+      aiWatchContainer.innerHTML = `
+        <div class="ai-watch-item info">
+          <div class="ai-watch-top">
+            <div class="ai-watch-title">Observer idle</div>
+            <div class="ai-watch-meta">awaiting signal</div>
+          </div>
+          <div class="ai-watch-summary">The advisory watcher will post here when logs or realized P&L look abnormal.</div>
+          <div class="ai-watch-rec">It is read-only by design, so it cannot place trades or silently change settings.</div>
+        </div>`;
+      return;
+    }
+
+    aiWatchContainer.innerHTML = reports.map(report => `
+      <div class="ai-watch-item ${report.severity || 'info'}">
+        <div class="ai-watch-top">
+          <div class="ai-watch-title">${report.title || 'AI observer note'}</div>
+          <div class="ai-watch-meta">${report.category || 'glitch'} · ${report.severity || 'info'}</div>
+        </div>
+            <div class="ai-watch-summary">${report.summary || ''}</div>
+        <div class="ai-watch-rec">Action: ${report.recommended_action || 'review'} · Next step: ${report.recommendation || ''}</div>
+      </div>
+    `).join('');
   }
 
   // ── Stats Cards ─────────────────────────────────────────────────────────
@@ -870,6 +1090,8 @@
 
       // Also push recent logs from the same fetch
       renderLogs(d.recent_logs || []);
+      renderAiReports(d.ai_reports || []);
+      renderAiAlert(d.ai_alert || null);
     } catch (e) { /* silent fail */ }
   }
 

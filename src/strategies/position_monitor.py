@@ -37,7 +37,7 @@ from py_clob_client.order_builder.constants import SELL
 # Strategies whose orders are managed elsewhere (not TP/SL monitored).
 # position_monitor is excluded from its own scan so it doesn't recursively
 # try to "exit" the exit orders it just placed.
-_EXCLUDED_STRATEGIES = {"market_making", "position_monitor"}
+_EXCLUDED_STRATEGIES = {"market_making", "position_monitor", "live position", "live_account"}
 
 # Near-certainty strategies use an absolute TP near $1.00, not pct-based
 _NEAR_CERTAINTY_STRATEGIES = {"near_certainty", "inverted_near_certainty"}

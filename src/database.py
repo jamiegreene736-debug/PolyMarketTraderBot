@@ -5,6 +5,17 @@ from loguru import logger
 DB_PATH = "bot_data.db"
 
 
+async def _column_exists(db, table: str, column: str) -> bool:
+    async with db.execute(f"PRAGMA table_info({table})") as cur:
+        rows = await cur.fetchall()
+    return any(row[1] == column for row in rows)
+
+
+async def _ensure_column(db, table: str, column: str, ddl: str):
+    if not await _column_exists(db, table, column):
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -40,6 +51,24 @@ async def init_db():
                 message   TEXT NOT NULL
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ai_observer_reports (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp      TEXT NOT NULL,
+                category       TEXT NOT NULL,
+                severity       TEXT NOT NULL,
+                title          TEXT NOT NULL,
+                summary        TEXT NOT NULL,
+                recommendation TEXT NOT NULL,
+                recommended_action TEXT NOT NULL DEFAULT 'review',
+                acknowledged   INTEGER NOT NULL DEFAULT 0,
+                acknowledged_at TEXT,
+                fingerprint    TEXT NOT NULL UNIQUE
+            )
+        """)
+        await _ensure_column(db, "ai_observer_reports", "recommended_action", "TEXT NOT NULL DEFAULT 'review'")
+        await _ensure_column(db, "ai_observer_reports", "acknowledged", "INTEGER NOT NULL DEFAULT 0")
+        await _ensure_column(db, "ai_observer_reports", "acknowledged_at", "TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_control (
                 id             INTEGER PRIMARY KEY CHECK (id = 1),
@@ -147,6 +176,118 @@ async def log_to_db(level: str, message: str):
             INSERT INTO bot_logs (timestamp, level, message) VALUES (?, ?, ?)
         """, (datetime.utcnow().isoformat(), level, message))
         await db.commit()
+
+
+async def get_recent_logs(limit: int = 100, exclude_prefix: str | None = None) -> list[dict]:
+    query = "SELECT timestamp, level, message FROM bot_logs"
+    params: list = []
+    if exclude_prefix:
+        query += " WHERE message NOT LIKE ?"
+        params.append(f"{exclude_prefix}%")
+    query += " ORDER BY timestamp DESC LIMIT ?"
+    params.append(limit)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, tuple(params)) as cur:
+            rows = [dict(row) for row in await cur.fetchall()]
+    rows.reverse()
+    return rows
+
+
+async def insert_ai_observer_report(
+    category: str,
+    severity: str,
+    title: str,
+    summary: str,
+    recommendation: str,
+    recommended_action: str,
+    fingerprint: str,
+ ) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            INSERT OR IGNORE INTO ai_observer_reports
+                (
+                    timestamp, category, severity, title, summary,
+                    recommendation, recommended_action, fingerprint
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                datetime.utcnow().isoformat(),
+                category,
+                severity,
+                title,
+                summary,
+                recommendation,
+                recommended_action,
+                fingerprint,
+            ),
+        )
+        await db.commit()
+    return cur.rowcount > 0
+
+
+async def get_recent_ai_observer_reports(limit: int = 6) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT
+                timestamp, category, severity, title, summary, recommendation,
+                recommended_action, acknowledged, acknowledged_at
+            FROM ai_observer_reports
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cur:
+            return [dict(row) for row in await cur.fetchall()]
+
+
+async def acknowledge_ai_observer_alerts() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """
+            UPDATE ai_observer_reports
+            SET acknowledged = 1, acknowledged_at = ?
+            WHERE acknowledged = 0
+            """,
+            (datetime.utcnow().isoformat(),),
+        )
+        await db.commit()
+    return cur.rowcount
+
+
+async def get_ai_observer_alert_state() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT
+                timestamp, category, severity, title, summary, recommendation,
+                recommended_action
+            FROM ai_observer_reports
+            WHERE acknowledged = 0
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 3
+                    WHEN 'warning' THEN 2
+                    ELSE 1
+                END DESC,
+                timestamp DESC
+            LIMIT 1
+            """
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return {"active": False}
+
+    data = dict(row)
+    data["active"] = True
+    data["pause_recommended"] = data.get("recommended_action") == "pause"
+    return data
 
 
 async def get_recent_closed_pnls(limit: int = 20) -> list[float]:
@@ -301,6 +442,40 @@ async def get_dashboard_stats() -> dict:
             SELECT * FROM bot_logs ORDER BY timestamp DESC LIMIT 100
         """) as cur:
             recent_logs = [dict(row) for row in await cur.fetchall()]
+            recent_logs.reverse()
+
+        # Recent AI observer reports
+        async with db.execute("""
+            SELECT
+                timestamp, category, severity, title, summary, recommendation,
+                recommended_action, acknowledged, acknowledged_at
+            FROM ai_observer_reports
+            ORDER BY timestamp DESC
+            LIMIT 6
+        """) as cur:
+            ai_reports = [dict(row) for row in await cur.fetchall()]
+
+        async with db.execute(
+            """
+            SELECT
+                timestamp, category, severity, title, summary, recommendation,
+                recommended_action
+            FROM ai_observer_reports
+            WHERE acknowledged = 0
+            ORDER BY
+                CASE severity
+                    WHEN 'critical' THEN 3
+                    WHEN 'warning' THEN 2
+                    ELSE 1
+                END DESC,
+                timestamp DESC
+            LIMIT 1
+            """
+        ) as cur:
+            ai_alert = dict(row) if (row := await cur.fetchone()) else {"active": False}
+            if ai_alert.get("timestamp"):
+                ai_alert["active"] = True
+                ai_alert["pause_recommended"] = ai_alert.get("recommended_action") == "pause"
 
     return {
         "total_pnl": round(total_pnl, 2),
@@ -314,4 +489,6 @@ async def get_dashboard_stats() -> dict:
         "strategy_stats": strategy_stats,
         "balance_history": balance_history,
         "recent_logs": recent_logs,
+        "ai_reports": ai_reports,
+        "ai_alert": ai_alert,
     }

@@ -29,6 +29,7 @@ from src.market_data import MarketData
 from src.order_manager import OrderManager
 from src.capital_manager import CapitalManager
 from src import database as db
+from src.ai_observer import AIObserver
 
 from src.strategies.near_certainty import NearCertaintyStrategy
 from src.strategies.inverted_near_certainty import InvertedNearCertaintyStrategy
@@ -58,6 +59,7 @@ _capital: "CapitalManager | None" = None
 _circuit_breaker: "CircuitBreaker | None" = None
 _client_ref: "PolymarketClient | None" = None
 _market_data_ref: "MarketData | None" = None
+_ai_observer: "AIObserver | None" = None
 
 
 def load_config() -> dict:
@@ -68,7 +70,7 @@ def load_config() -> dict:
 # ── Bot loop ──────────────────────────────────────────────────────────────────
 
 async def run_bot_loop():
-    global _order_manager, _capital, _circuit_breaker, _client_ref, _market_data_ref
+    global _order_manager, _capital, _circuit_breaker, _client_ref, _market_data_ref, _ai_observer
     config = load_config()
     bot_cfg = config.get("bot", {})
 
@@ -181,6 +183,7 @@ async def run_bot_loop():
     _order_manager = order_manager
     _capital = capital
     _circuit_breaker = CircuitBreaker(config, start_balance=capital.total_usdc)
+    _ai_observer = AIObserver(config.get("ai_observer", {}))
 
     strategies = [
         # Run position monitor FIRST each tick so exits happen before new entries
@@ -221,6 +224,8 @@ async def run_bot_loop():
     try:
         while _bot_state["status"] == "running":
             try:
+                recent_closed = []
+
                 # Refresh balance every 10 ticks
                 # In dry-run mode, skip real balance updates — CLOB reports $0 because
                 # funds are in the CTF Exchange contract, which would immediately trip the
@@ -303,6 +308,15 @@ async def run_bot_loop():
                         msg = f"[{s.name}] crashed: {e}"
                         logger.error(msg)
                         await db.log_to_db("ERROR", msg)
+
+                if _ai_observer is not None:
+                    _ai_observer.maybe_schedule(
+                        balance=capital.total_usdc,
+                        open_orders=order_manager.get_total_open_orders(),
+                        bot_status=_bot_state.get("status", "unknown"),
+                        last_error=_bot_state.get("last_error"),
+                        closed_positions=recent_closed,
+                    )
 
                 _bot_state["last_heartbeat"] = datetime.utcnow().isoformat()
                 _bot_state["last_error"] = None
@@ -756,6 +770,15 @@ async def api_clear_logs(_=Depends(verify_password)):
     return {"ok": True}
 
 
+@app.post("/api/ai-alerts/acknowledge")
+async def api_acknowledge_ai_alerts(_=Depends(verify_password)):
+    count = await db.acknowledge_ai_observer_alerts()
+    msg = f"AI observer alerts acknowledged ({count})"
+    logger.info(msg)
+    await db.log_to_db("INFO", msg)
+    return {"ok": True, "count": count}
+
+
 @app.post("/api/reset-data")
 async def api_reset_data(_=Depends(verify_password)):
     """Wipe all trades, balance snapshots, logs, and in-memory positions."""
@@ -767,6 +790,7 @@ async def api_reset_data(_=Depends(verify_password)):
         await conn.execute("DELETE FROM trades")
         await conn.execute("DELETE FROM balance_snapshots")
         await conn.execute("DELETE FROM bot_logs")
+        await conn.execute("DELETE FROM ai_observer_reports")
         await conn.commit()
     # Clear in-memory state so the dashboard shows clean zeros immediately
     if _order_manager is not None:

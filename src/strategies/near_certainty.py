@@ -30,13 +30,12 @@ class NearCertaintyStrategy(BaseStrategy):
         use_kelly        = self.config.get("use_kelly_sizing", True)
         kelly_frac       = self.config.get("kelly_fraction", 0.25)
 
-        # If max_hours is large (>720), scan all active markets instead of resolving-soon
-        if max_hours >= 720:
-            markets = await self.market_data.get_markets()
-        else:
-            markets = await self.market_data.get_markets_resolving_soon(
-                max_hours=max_hours, min_volume=min_volume
-            )
+        # Always respect the configured resolution cutoff. Expanding to all
+        # active markets here pulls in season-long futures that then bleed the
+        # spread on forced exits.
+        markets = await self.market_data.get_markets_resolving_soon(
+            max_hours=max_hours, min_volume=min_volume
+        )
 
         if not markets:
             self.log("No active markets found")
