@@ -405,6 +405,43 @@ def _trade_sort_key(row: dict) -> str:
     return str(row.get("resolved_at") or row.get("timestamp") or "")
 
 
+def _format_age_label(seconds: float | None) -> str:
+    if seconds is None or seconds < 0:
+        return "—"
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    if minutes == 0:
+        return f"{hours}h"
+    return f"{hours}h {minutes}m"
+
+
+def _position_monitor_hold_hours() -> dict:
+    cfg = load_config()
+    pm_cfg = cfg.get("strategies", {}).get("position_monitor", {})
+    return pm_cfg.get("max_hold_hours", {}) if isinstance(pm_cfg, dict) else {}
+
+
+def _max_hold_seconds(strategy: str) -> float | None:
+    hold_cfg = _position_monitor_hold_hours()
+    if not isinstance(hold_cfg, dict):
+        return None
+
+    hours = hold_cfg.get(strategy)
+    if hours is None:
+        hours = hold_cfg.get("default")
+    if hours is None:
+        return None
+
+    try:
+        return float(hours) * 3600
+    except (TypeError, ValueError):
+        return None
+
+
 async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
     if _client_ref is None:
         return []
@@ -594,24 +631,63 @@ async def api_positions(_=Depends(verify_password)):
     cash = float(cash_data.get("availableBalance") or cash_data.get("balance") or 0.0)
 
     raw_positions = await _client_ref.get_positions()
+    local_position_refs = _order_manager.get_open_positions() if _order_manager is not None else []
+    local_by_market_side: dict[tuple[str, str], list[dict]] = {}
+    for ref in local_position_refs:
+        key = (str(ref.get("market_slug") or "").strip().lower(), str(ref.get("intent") or ""))
+        if key[0]:
+            local_by_market_side.setdefault(key, []).append(ref)
+
+    now = datetime.utcnow().timestamp()
     positions = []
     for p in raw_positions:
         outcome = str(p.get("outcome") or "").upper()
         intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
+        market_slug = p.get("slug") or p.get("title") or "—"
+        local_match = None
+        match_key = str(p.get("slug") or "").strip().lower()
+        if match_key:
+            candidates = local_by_market_side.get((match_key, intent), [])
+            if candidates:
+                local_match = candidates.pop(0)
         avg_price = float(p.get("avgPrice") or 0.0)
         size = float(p.get("size") or 0.0)
         current_value = float(p.get("currentValue") or (avg_price * size) or 0.0)
+        strategy = (local_match or {}).get("strategy") or "live position"
+        placed_at = (local_match or {}).get("placed_at")
+        age_seconds = None
+        if placed_at is not None:
+            try:
+                age_seconds = max(0.0, now - float(placed_at))
+            except (TypeError, ValueError):
+                age_seconds = None
+        max_hold_seconds = _max_hold_seconds(strategy)
+        force_exit_at = None
+        force_exit_in = None
+        if age_seconds is not None and max_hold_seconds is not None:
+            force_exit_in = max_hold_seconds - age_seconds
+            force_exit_at = datetime.utcfromtimestamp(float(placed_at) + max_hold_seconds).isoformat()
         positions.append({
             "order_id": "",
-            "market_slug": p.get("slug") or p.get("title") or "—",
+            "market_slug": market_slug,
             "title": p.get("title") or p.get("slug") or "—",
             "intent": intent,
             "price": avg_price,
             "quantity": size,
             "current_value": current_value,
             "outcome": p.get("outcome") or "—",
-            "strategy": "live position",
+            "strategy": strategy,
             "closable": False,
+            "age_label": _format_age_label(age_seconds),
+            "max_hold_label": _format_age_label(max_hold_seconds),
+            "force_exit_in_label": (
+                "expired"
+                if force_exit_in is not None and force_exit_in <= 0
+                else _format_age_label(force_exit_in)
+                if force_exit_in is not None
+                else "—"
+            ),
+            "force_exit_at": force_exit_at or "",
         })
 
     position_value = sum(p["current_value"] for p in positions)

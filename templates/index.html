@@ -398,12 +398,14 @@
             <th>Side</th>
             <th>Entry Price</th>
             <th>Qty</th>
+            <th>Age</th>
+            <th>Auto Exit</th>
             <th>Cost Basis</th>
             <th>Action</th>
           </tr>
         </thead>
         <tbody id="openPositionsBody">
-          <tr><td colspan="7" style="text-align:center; color:#475569; padding:32px;">Loading...</td></tr>
+          <tr><td colspan="9" style="text-align:center; color:#475569; padding:32px;">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -587,7 +589,7 @@
       // Open positions table
       const tbody = document.getElementById('openPositionsBody');
       if (!data.positions || data.positions.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:#475569; padding:32px;">No open positions</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#475569; padding:32px;">No open positions</td></tr>';
         return;
       }
 
@@ -607,6 +609,11 @@
             <td><span style="color:${sideColor}; font-weight:600;">${label}</span></td>
             <td>$${parseFloat(p.price).toFixed(4)}</td>
             <td>${parseFloat(p.quantity).toFixed(1)}</td>
+            <td>${p.age_label || '—'}</td>
+            <td title="${p.force_exit_at || ''}">
+              ${p.force_exit_in_label || '—'}
+              ${p.max_hold_label && p.max_hold_label !== '—' ? `<div style="color:#64748b; font-size:11px; margin-top:2px;">max ${p.max_hold_label}</div>` : ''}
+            </td>
             <td>$${cost}</td>
             <td>${actionCell}</td>
           </tr>`;
