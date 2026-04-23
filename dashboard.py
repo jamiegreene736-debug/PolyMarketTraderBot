@@ -371,6 +371,62 @@ def verify_password(credentials: HTTPBasicCredentials = Depends(security)):
     return credentials
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_text(value: str | None) -> str:
+    return (value or "").strip().lower()
+
+
+def _iso_from_polymarket_timestamp(value) -> str:
+    if value in (None, ""):
+        return ""
+
+    try:
+        raw = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    # Data API timestamps can be in seconds or milliseconds.
+    if raw > 1_000_000_000_000:
+        raw /= 1000.0
+
+    try:
+        return datetime.utcfromtimestamp(raw).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def _trade_sort_key(row: dict) -> str:
+    return str(row.get("resolved_at") or row.get("timestamp") or "")
+
+
+async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
+    if _client_ref is None:
+        return []
+
+    positions: list[dict] = []
+    offset = 0
+
+    while len(positions) < limit:
+        batch = await _client_ref.get_closed_positions(
+            limit=min(50, limit - len(positions)),
+            offset=offset,
+        )
+        if not batch:
+            break
+        positions.extend(batch)
+        if len(batch) < 50:
+            break
+        offset += len(batch)
+
+    return positions
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -570,7 +626,7 @@ async def api_positions(_=Depends(verify_password)):
 
 @app.get("/api/closed-trades")
 async def api_closed_trades(_=Depends(verify_password)):
-    """Return closed/cancelled trades plus summary stats, newest first."""
+    """Return live account closed trades plus local cancelled trades, newest first."""
     async with aiosqlite.connect(db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         async with conn.execute("""
@@ -579,25 +635,65 @@ async def api_closed_trades(_=Depends(verify_password)):
             ORDER BY COALESCE(resolved_at, timestamp) DESC
             LIMIT 100
         """) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
+            status_rows = [dict(r) for r in await cur.fetchall()]
 
         async with conn.execute("""
-            SELECT COUNT(*) AS total
-            FROM trades
+            SELECT * FROM trades
+            ORDER BY COALESCE(resolved_at, timestamp) DESC
+            LIMIT 300
         """) as cur:
-            total_trades = (await cur.fetchone())["total"]
+            history_rows = [dict(r) for r in await cur.fetchall()]
 
-        today = datetime.utcnow().date().isoformat()
-        async with conn.execute("""
-            SELECT COUNT(*) AS total
-            FROM trades
-            WHERE timestamp LIKE ?
-        """, (f"{today}%",)) as cur:
-            trades_today = (await cur.fetchone())["total"]
+    strategy_lookup: dict[tuple[str, str], dict] = {}
+    for row in history_rows:
+        side = row.get("side") or ""
+        for market_ref in (row.get("market_slug"), row.get("question")):
+            key = (_normalize_text(market_ref), side)
+            if key[0] and key not in strategy_lookup:
+                strategy_lookup[key] = row
 
-    closed = [r for r in rows if r.get("status") == "closed"]
-    realized_pnl = round(sum(float(r.get("pnl") or 0.0) for r in closed), 2)
-    wins = sum(1 for r in closed if float(r.get("pnl") or 0.0) > 0)
+    live_closed_rows: list[dict] = []
+    live_closed_positions = await _get_live_closed_positions(limit=150)
+    for pos in live_closed_positions:
+        outcome = str(pos.get("outcome") or "").upper()
+        side = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
+        slug = pos.get("slug") or ""
+        title = pos.get("title") or slug or "—"
+        match = (
+            strategy_lookup.get((_normalize_text(slug), side))
+            or strategy_lookup.get((_normalize_text(title), side))
+        )
+        avg_price = _safe_float(pos.get("avgPrice"))
+        total_bought = _safe_float(pos.get("totalBought"))
+        quantity = _safe_float(pos.get("size"))
+        if quantity <= 0 and avg_price > 0:
+            quantity = total_bought / avg_price
+
+        live_closed_rows.append({
+            "timestamp": _iso_from_polymarket_timestamp(pos.get("timestamp")),
+            "resolved_at": _iso_from_polymarket_timestamp(pos.get("timestamp")),
+            "strategy": (match or {}).get("strategy") or "live_account",
+            "market_slug": slug,
+            "question": title,
+            "side": side,
+            "price": avg_price,
+            "quantity": quantity,
+            "order_id": (match or {}).get("order_id") or "",
+            "status": "closed",
+            "pnl": _safe_float(pos.get("realizedPnl")),
+        })
+
+    local_cancelled = [row for row in status_rows if row.get("status") == "cancelled"]
+    closed = live_closed_rows or [row for row in status_rows if row.get("status") == "closed"]
+    all_trades = sorted(
+        [*closed, *local_cancelled],
+        key=_trade_sort_key,
+        reverse=True,
+    )
+    trades = all_trades[:100]
+
+    realized_pnl = round(sum(_safe_float(r.get("pnl")) for r in closed), 2)
+    wins = sum(1 for r in closed if _safe_float(r.get("pnl")) > 0)
     total_closed = len(closed)
     win_rate = round((wins / total_closed) * 100, 1) if total_closed else 0.0
 
@@ -605,7 +701,7 @@ async def api_closed_trades(_=Depends(verify_password)):
     for row in closed:
         strategy = row.get("strategy") or "unknown"
         bucket = strategy_rollup.setdefault(strategy, {"strategy": strategy, "pnl": 0.0, "wins": 0, "total": 0})
-        pnl = float(row.get("pnl") or 0.0)
+        pnl = _safe_float(row.get("pnl"))
         bucket["pnl"] += pnl
         bucket["total"] += 1
         if pnl > 0:
@@ -625,14 +721,21 @@ async def api_closed_trades(_=Depends(verify_password)):
         reverse=True,
     )
 
+    today = datetime.utcnow().date().isoformat()
+    trades_today = sum(
+        1
+        for row in all_trades
+        if str(row.get("resolved_at") or row.get("timestamp") or "").startswith(today)
+    )
+
     return {
-        "trades": rows,
+        "trades": trades,
         "summary": {
             "realized_pnl": realized_pnl,
             "wins": wins,
             "total_closed": total_closed,
             "win_rate": win_rate,
-            "total_trades": total_trades,
+            "total_trades": len(all_trades),
             "trades_today": trades_today,
             "strategy_stats": strategy_stats,
         },

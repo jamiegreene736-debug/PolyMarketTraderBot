@@ -639,6 +639,31 @@ class PolymarketClient:
             logger.warning(f"get_positions failed: {e}")
             return []
 
+    async def get_closed_positions(self, limit: int = 50, offset: int = 0) -> list:
+        user = (self.funder_address or self.signer_address or "").strip()
+        if not user:
+            return []
+
+        try:
+            resp = await self._http.get(
+                f"{DATA_API}/closed-positions",
+                params={
+                    "user": user,
+                    "limit": min(max(limit, 1), 50),
+                    "offset": max(offset, 0),
+                    "sortBy": "TIMESTAMP",
+                    "sortDirection": "DESC",
+                },
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            positions = raw if isinstance(raw, list) else []
+            logger.info(f"get_closed_positions: {len(positions)} closed positions for {user}")
+            return positions
+        except Exception as e:
+            logger.warning(f"get_closed_positions failed: {e}")
+            return []
+
     async def get_activities(self) -> list:
         return []
 
