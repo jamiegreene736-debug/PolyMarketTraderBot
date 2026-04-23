@@ -49,6 +49,15 @@ async def init_db():
                 updated_at     TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS auto_close_overrides (
+                condition_id TEXT NOT NULL,
+                outcome      TEXT NOT NULL,
+                active       INTEGER NOT NULL DEFAULT 1,
+                updated_at   TEXT NOT NULL,
+                PRIMARY KEY (condition_id, outcome)
+            )
+        """)
         # Ensure exactly one control row exists
         await db.execute("""
             INSERT OR IGNORE INTO bot_control (id, status, updated_at)
@@ -200,6 +209,38 @@ async def count_trades_today(strategy: str | None = None) -> int:
         async with db.execute(query, params) as cur:
             row = await cur.fetchone()
     return int(row["count"] if row else 0)
+
+
+async def get_auto_close_overrides() -> set[tuple[str, str]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT condition_id, outcome FROM auto_close_overrides WHERE active = 1"
+        ) as cur:
+            rows = await cur.fetchall()
+    return {
+        (str(row["condition_id"]).strip(), str(row["outcome"]).upper().strip())
+        for row in rows
+    }
+
+
+async def set_auto_close_override(condition_id: str, outcome: str, active: bool):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            INSERT INTO auto_close_overrides (condition_id, outcome, active, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(condition_id, outcome)
+            DO UPDATE SET active = excluded.active, updated_at = excluded.updated_at
+            """,
+            (
+                condition_id.strip(),
+                outcome.upper().strip(),
+                1 if active else 0,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        await db.commit()
 
 
 async def get_dashboard_stats() -> dict:

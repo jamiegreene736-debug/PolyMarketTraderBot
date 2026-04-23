@@ -57,6 +57,7 @@ _order_manager: "OrderManager | None" = None
 _capital: "CapitalManager | None" = None
 _circuit_breaker: "CircuitBreaker | None" = None
 _client_ref: "PolymarketClient | None" = None
+_market_data_ref: "MarketData | None" = None
 
 
 def load_config() -> dict:
@@ -67,7 +68,7 @@ def load_config() -> dict:
 # ── Bot loop ──────────────────────────────────────────────────────────────────
 
 async def run_bot_loop():
-    global _order_manager, _capital, _circuit_breaker, _client_ref
+    global _order_manager, _capital, _circuit_breaker, _client_ref, _market_data_ref
     config = load_config()
     bot_cfg = config.get("bot", {})
 
@@ -122,6 +123,7 @@ async def run_bot_loop():
         await client.setup_allowances()
 
     market_data = MarketData(client)
+    _market_data_ref = market_data
     order_manager = OrderManager(
         client,
         max_concurrent=bot_cfg.get("max_concurrent_orders", 20),
@@ -650,6 +652,25 @@ async def api_reset_data(_=Depends(verify_password)):
     return {"ok": True}
 
 
+@app.post("/api/auto-close-override")
+async def api_auto_close_override(payload: dict, _=Depends(verify_password)):
+    condition_id = str(payload.get("condition_id") or "").strip()
+    outcome = str(payload.get("outcome") or "").upper().strip()
+    active = bool(payload.get("active"))
+
+    if not condition_id or outcome not in {"YES", "NO"}:
+        raise HTTPException(status_code=400, detail="condition_id and outcome are required")
+
+    await db.set_auto_close_override(condition_id, outcome, active)
+    msg = (
+        f"Auto-close {'paused' if active else 'resumed'} for "
+        f"{condition_id[:12]}... {outcome}"
+    )
+    logger.info(msg)
+    await db.log_to_db("INFO", msg)
+    return {"ok": True, "condition_id": condition_id, "outcome": outcome, "active": active}
+
+
 @app.get("/api/positions")
 async def api_positions(_=Depends(verify_password)):
     """Return live Polymarket positions with balance breakdown."""
@@ -705,6 +726,15 @@ async def api_positions(_=Depends(verify_password)):
             key = (market_id, outcome_key)
             latest_buy_by_market_outcome[key] = max(latest_buy_by_market_outcome.get(key, 0.0), ts)
 
+    override_keys = await db.get_auto_close_overrides()
+    bbo_map: dict[str, dict] = {}
+    if _market_data_ref is not None:
+        slugs = [str(p.get("slug") or "").strip() for p in raw_positions]
+        bbos = await asyncio.gather(
+            *[_market_data_ref.get_bbo(slug) if slug else asyncio.sleep(0, result={}) for slug in slugs]
+        )
+        bbo_map = {slug: bbo or {} for slug, bbo in zip(slugs, bbos)}
+
     now = datetime.utcnow().timestamp()
     positions = []
     for p in raw_positions:
@@ -728,6 +758,15 @@ async def api_positions(_=Depends(verify_password)):
         size = float(p.get("size") or 0.0)
         current_value = float(p.get("currentValue") or (avg_price * size) or 0.0)
         strategy = (local_match or {}).get("strategy") or _infer_strategy_from_live_position(outcome, avg_price)
+        bbo = bbo_map.get(str(p.get("slug") or "").strip(), {})
+        try:
+            current_bid = float((bbo.get("bid") or {}).get("price", 0.0))
+        except (TypeError, ValueError):
+            current_bid = 0.0
+        try:
+            current_ask = float((bbo.get("ask") or {}).get("price", 1.0))
+        except (TypeError, ValueError):
+            current_ask = 1.0
         placed_at = (local_match or {}).get("placed_at")
         if placed_at is None:
             raw_timestamp = (local_match or {}).get("timestamp")
@@ -753,10 +792,17 @@ async def api_positions(_=Depends(verify_password)):
             force_exit_at_ts = float(placed_at) + max_hold_seconds
             force_exit_in = force_exit_at_ts - now
             force_exit_at = datetime.utcfromtimestamp(force_exit_at_ts).isoformat()
+        estimated_pnl = (
+            (current_bid - avg_price) * size
+            if outcome == "YES"
+            else (round(1.0 - current_ask, 4) - round(1.0 - avg_price, 4)) * size
+        )
+        override_active = (condition_id, outcome) in override_keys
         positions.append({
             "order_id": "",
             "market_slug": market_slug,
             "title": p.get("title") or p.get("slug") or "—",
+            "condition_id": condition_id,
             "intent": intent,
             "price": avg_price,
             "quantity": size,
@@ -764,11 +810,16 @@ async def api_positions(_=Depends(verify_password)):
             "outcome": p.get("outcome") or "—",
             "strategy": strategy,
             "closable": False,
+            "estimated_pnl": round(estimated_pnl, 2),
+            "override_active": override_active,
             "age_label": _format_age_label(age_seconds),
             "max_hold_label": _format_age_label(max_hold_seconds),
             "placed_at_ts": placed_at or 0,
             "max_hold_seconds": max_hold_seconds or 0,
             "force_exit_in_label": (
+                "manual hold"
+                if override_active
+                else
                 "expired"
                 if force_exit_in is not None and force_exit_in <= 0
                 else _format_age_label(force_exit_in)

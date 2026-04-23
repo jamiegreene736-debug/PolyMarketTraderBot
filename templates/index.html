@@ -84,6 +84,22 @@
     .btn-stop:hover:not(:disabled)  { background: #dc2626; }
     .btn-restart { background: #f59e0b; color: #000; }
     .btn-restart:hover:not(:disabled) { background: #d97706; }
+    .btn-override {
+      background: #1e2433;
+      color: #f8fafc;
+      border: 1px solid #334155;
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .btn-override.active {
+      background: #422006;
+      border-color: #92400e;
+      color: #fbbf24;
+    }
+    .btn-override:hover:not(:disabled) { filter: brightness(1.1); }
 
     .container { max-width: 1400px; margin: 0 auto; padding: 24px 32px; }
 
@@ -400,12 +416,13 @@
             <th>Qty</th>
             <th>Age</th>
             <th>Auto Exit</th>
+            <th>Est. P&amp;L</th>
             <th>Cost Basis</th>
             <th>Action</th>
           </tr>
         </thead>
         <tbody id="openPositionsBody">
-          <tr><td colspan="9" style="text-align:center; color:#475569; padding:32px;">Loading...</td></tr>
+          <tr><td colspan="10" style="text-align:center; color:#475569; padding:32px;">Loading...</td></tr>
         </tbody>
       </table>
     </div>
@@ -618,7 +635,7 @@
       // Open positions table
       const tbody = document.getElementById('openPositionsBody');
       if (!data.positions || data.positions.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" style="text-align:center; color:#475569; padding:32px;">No open positions</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color:#475569; padding:32px;">No open positions</td></tr>';
         return;
       }
 
@@ -628,9 +645,11 @@
         const label     = p.outcome || (p.intent.includes('BUY_LONG') ? 'YES' : 'NO');
         const market    = p.title || p.market_slug || '—';
         const strategy  = (p.strategy || '—').replace(/_/g, ' ');
-        const actionCell = p.closable && p.order_id
-          ? `<button class="btn-close-pos" onclick="closePosition('${p.order_id}', this)">Close</button>`
-          : '<span style="color:#475569;">Live on Polymarket</span>';
+        const estPnl = Number(p.estimated_pnl || 0);
+        const estPnlHtml = `<span class="${estPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${estPnl >= 0 ? '+' : ''}$${estPnl.toFixed(2)}</span>`;
+        const actionCell = p.condition_id
+          ? `<button class="btn-override ${p.override_active ? 'active' : ''}" onclick="toggleAutoCloseOverride('${p.condition_id}', '${p.outcome}', ${p.override_active ? 'false' : 'true'}, this)">${p.override_active ? 'Resume Auto' : 'Override Auto'}</button>`
+          : '<span style="color:#475569;">Unavailable</span>';
         return `
           <tr id="row-${p.order_id || market}">
             <td>${strategy}</td>
@@ -647,6 +666,7 @@
               ${p.force_exit_in_label || '—'}
               ${p.max_hold_label && p.max_hold_label !== '—' ? `<div style="color:#64748b; font-size:11px; margin-top:2px;">max ${p.max_hold_label}</div>` : ''}
             </td>
+            <td>${estPnlHtml}</td>
             <td>$${cost}</td>
             <td>${actionCell}</td>
           </tr>`;
@@ -676,6 +696,33 @@
       showToast('Network error', 'error');
       btn.disabled = false;
       btn.textContent = 'Close';
+    }
+  }
+
+  async function toggleAutoCloseOverride(conditionId, outcome, active, btn) {
+    btn.disabled = true;
+    const original = btn.textContent;
+    btn.textContent = active ? 'Holding...' : 'Resuming...';
+    try {
+      const res = await fetch('/api/auto-close-override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          condition_id: conditionId,
+          outcome,
+          active,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || 'Failed to update override');
+      }
+      showToast(active ? 'Auto-close paused for this position' : 'Auto-close resumed for this position', 'success');
+      await refreshPositions();
+    } catch (e) {
+      showToast(e.message || 'Override update failed', 'error');
+      btn.disabled = false;
+      btn.textContent = original;
     }
   }
 

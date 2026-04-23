@@ -27,7 +27,10 @@ Max hold time:
 
 import asyncio
 import time
+import re
+from datetime import datetime
 from src.strategies.base import BaseStrategy
+from src import database as db
 
 
 # Strategies whose orders are managed elsewhere (not TP/SL monitored).
@@ -38,6 +41,7 @@ _EXCLUDED_STRATEGIES = {"market_making", "position_monitor"}
 # Near-certainty strategies use an absolute TP near $1.00, not pct-based
 _NEAR_CERTAINTY_STRATEGIES = {"near_certainty", "inverted_near_certainty"}
 _NEAR_CERTAINTY_TP_THRESHOLD = 0.99   # exit when price reaches $0.99
+_NEAR_CERTAINTY_INFER_THRESHOLD = 0.93
 
 # Smart force-exit tuning. First attempt at MAX_HOLD tries a passive limit
 # at the fair price (no overpay). After this many seconds of unfilled
@@ -51,6 +55,114 @@ class PositionMonitorStrategy(BaseStrategy):
         super().__init__(*args, **kwargs)
         # order_id → (first_attempt_ts, attempt_count)
         self._exit_attempts: dict[str, tuple[float, int]] = {}
+
+    def _normalize_market_key(self, value: str | None) -> str:
+        raw = (value or "").strip().lower()
+        if not raw:
+            return ""
+        raw = raw.replace("–", "-").replace("—", "-")
+        return re.sub(r"[^a-z0-9]+", "", raw)
+
+    def _infer_strategy(self, outcome: str, avg_price: float) -> str:
+        if outcome == "YES" and avg_price >= _NEAR_CERTAINTY_INFER_THRESHOLD:
+            return "near_certainty"
+        if outcome == "NO" and avg_price >= _NEAR_CERTAINTY_INFER_THRESHOLD:
+            return "inverted_near_certainty"
+        return "live position"
+
+    async def _build_managed_positions(self) -> list[dict]:
+        user_address = (self.client.funder_address or self.client.signer_address or "").strip()
+        raw_positions = await self.client.get_positions(user=user_address)
+        if not raw_positions:
+            return []
+
+        local_refs = await db.get_open_trade_rows()
+        local_refs.extend(self.order_manager.get_open_positions())
+
+        local_by_market_side: dict[tuple[str, str], list[dict]] = {}
+        for ref in local_refs:
+            side_key = str(ref.get("intent") or ref.get("side") or "")
+            if not side_key:
+                continue
+            for market_ref in (ref.get("market_slug"), ref.get("question")):
+                market_key = self._normalize_market_key(market_ref)
+                if market_key:
+                    local_by_market_side.setdefault((market_key, side_key), []).append(ref)
+
+        condition_ids = [
+            str(p.get("conditionId") or "").strip()
+            for p in raw_positions
+            if p.get("conditionId")
+        ]
+        latest_buy_by_market_outcome: dict[tuple[str, str], float] = {}
+        if user_address and condition_ids:
+            trade_rows = await self.client.get_trades(
+                user=user_address,
+                markets=condition_ids,
+                limit=min(max(len(condition_ids) * 20, 50), 1000),
+                taker_only=False,
+                side="BUY",
+            )
+            for trade in trade_rows:
+                market_id = str(trade.get("conditionId") or "").strip()
+                outcome_key = str(trade.get("outcome") or "").upper()
+                if not market_id or not outcome_key:
+                    continue
+                try:
+                    ts = float(trade.get("timestamp") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if ts > 1_000_000_000_000:
+                    ts /= 1000.0
+                latest_buy_by_market_outcome[(market_id, outcome_key)] = max(
+                    latest_buy_by_market_outcome.get((market_id, outcome_key), 0.0),
+                    ts,
+                )
+
+        overrides = await db.get_auto_close_overrides()
+        positions: list[dict] = []
+        for pos in raw_positions:
+            condition_id = str(pos.get("conditionId") or "").strip()
+            outcome = str(pos.get("outcome") or "").upper()
+            intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
+            local_match = None
+            for market_ref in (pos.get("slug"), pos.get("title")):
+                market_key = self._normalize_market_key(market_ref)
+                if not market_key:
+                    continue
+                candidates = local_by_market_side.get((market_key, intent), [])
+                if candidates:
+                    local_match = candidates.pop(0)
+                    break
+
+            avg_price = float(pos.get("avgPrice") or 0.0)
+            size = float(pos.get("size") or 0.0)
+            strategy = (local_match or {}).get("strategy") or self._infer_strategy(outcome, avg_price)
+            placed_at = (local_match or {}).get("placed_at")
+            if placed_at is None:
+                raw_ts = (local_match or {}).get("timestamp")
+                if raw_ts:
+                    try:
+                        placed_at = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00")).timestamp()
+                    except Exception:
+                        placed_at = None
+            if placed_at is None and condition_id and outcome:
+                placed_at = latest_buy_by_market_outcome.get((condition_id, outcome))
+
+            positions.append({
+                "order_id": (local_match or {}).get("order_id") or "",
+                "market_slug": pos.get("slug") or pos.get("title") or "",
+                "question": (local_match or {}).get("question") or pos.get("title") or pos.get("slug") or "",
+                "intent": intent,
+                "price": avg_price,
+                "quantity": size,
+                "strategy": strategy,
+                "placed_at": float(placed_at) if placed_at is not None else time.time(),
+                "condition_id": condition_id,
+                "override_active": (condition_id, outcome) in overrides,
+            })
+
+        return positions
 
     async def run(self):
         if not self.enabled:
@@ -72,9 +184,10 @@ class PositionMonitorStrategy(BaseStrategy):
                 hours = hold_cfg.get("default", default_max)
             return float(hours) * 3600
 
-        positions = self.order_manager.get_open_positions(
-            exclude_strategies=list(_EXCLUDED_STRATEGIES)
-        )
+        positions = [
+            pos for pos in await self._build_managed_positions()
+            if pos.get("strategy") not in _EXCLUDED_STRATEGIES
+        ]
         if not positions:
             return
 
@@ -98,6 +211,8 @@ class PositionMonitorStrategy(BaseStrategy):
             strategy    = pos.get("strategy", "")
             placed_at   = pos.get("placed_at", now)
             age_hours   = (now - placed_at) / 3600
+            if pos.get("override_active"):
+                continue
 
             bbo = bbo_by_slug.get(slug)
             if not bbo:
@@ -200,11 +315,10 @@ class PositionMonitorStrategy(BaseStrategy):
                 f"age={age_hours:.1f}h est_pnl=${pnl_est:.2f}"
             )
 
-            await self.order_manager.cancel_order(order_id)
-
             # Release the capital that was locked when the entry was placed.
-            # This must happen regardless of whether the exit order fills,
-            # because the entry position is gone the moment we cancel it above.
+            # For live account positions we no longer rely on an open entry order
+            # existing in memory, so we place the exit directly and then retire
+            # the original open trade row from the local DB.
             notional = round(entry_price * quantity, 2)
             self.capital_manager.release(strategy, notional)
 
@@ -220,6 +334,8 @@ class PositionMonitorStrategy(BaseStrategy):
             )
 
             if oid:
+                if order_id:
+                    await db.cancel_trade(order_id)
                 await self.order_manager.mark_filled(oid, pnl=pnl_est)
                 # Done with this position — clear any exit-attempt state.
                 self._exit_attempts.pop(order_id, None)
