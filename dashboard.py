@@ -9,6 +9,7 @@ memory directly — no cross-process database sync issues.
 import os
 import json
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -382,6 +383,21 @@ def _normalize_text(value: str | None) -> str:
     return (value or "").strip().lower()
 
 
+def _normalize_market_key(value: str | None) -> str:
+    """
+    Normalize market identifiers across slugs and human-readable titles.
+    This lets us match:
+      - slug vs question
+      - punctuation differences
+      - unicode dash vs ASCII dash
+    """
+    raw = _normalize_text(value)
+    if not raw:
+        return ""
+    raw = raw.replace("–", "-").replace("—", "-")
+    return re.sub(r"[^a-z0-9]+", "", raw)
+
+
 def _iso_from_polymarket_timestamp(value) -> str:
     if value in (None, ""):
         return ""
@@ -639,11 +655,13 @@ async def api_positions(_=Depends(verify_password)):
 
     local_by_market_side: dict[tuple[str, str], list[dict]] = {}
     for ref in local_position_refs:
-        key = (str(ref.get("market_slug") or "").strip().lower(), str(ref.get("intent") or ""))
-        if not key[1]:
-            key = (key[0], str(ref.get("side") or ""))
-        if key[0]:
-            local_by_market_side.setdefault(key, []).append(ref)
+        side_key = str(ref.get("intent") or ref.get("side") or "")
+        if not side_key:
+            continue
+        for market_ref in (ref.get("market_slug"), ref.get("question")):
+            market_key = _normalize_market_key(market_ref)
+            if market_key:
+                local_by_market_side.setdefault((market_key, side_key), []).append(ref)
 
     now = datetime.utcnow().timestamp()
     positions = []
@@ -652,13 +670,13 @@ async def api_positions(_=Depends(verify_password)):
         intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
         market_slug = p.get("slug") or p.get("title") or "—"
         local_match = None
-        match_key = str(p.get("slug") or "").strip().lower()
+        match_key = _normalize_market_key(p.get("slug"))
         if match_key:
             candidates = local_by_market_side.get((match_key, intent), [])
             if candidates:
                 local_match = candidates.pop(0)
         if local_match is None:
-            title_key = str(p.get("title") or "").strip().lower()
+            title_key = _normalize_market_key(p.get("title"))
             if title_key:
                 candidates = local_by_market_side.get((title_key, intent), [])
                 if candidates:
