@@ -920,7 +920,7 @@ async def api_positions(_=Depends(verify_password)):
         estimated_pnl = (
             (current_bid - avg_price) * size
             if outcome == "YES"
-            else (round(1.0 - current_ask, 4) - round(1.0 - avg_price, 4)) * size
+            else (round(1.0 - current_ask, 4) - avg_price) * size
         )
         override_active = (condition_id, outcome) in override_keys
         positions.append({

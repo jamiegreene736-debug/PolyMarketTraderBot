@@ -13,7 +13,7 @@ TP/SL logic:
     Exit: place BUY_SHORT at current ask
 
   SHORT (BUY_SHORT / NO position)
-    entry_no  = 1 − entry_price
+    entry_no  = entry_price
     no_bid    = 1 − current_yes_ask
     TP: no_bid >= entry_no × (1 + tp_pct)  OR  no_bid >= 0.99
     SL: no_bid <= entry_no × (1 − sl_pct)
@@ -274,14 +274,14 @@ class PositionMonitorStrategy(BaseStrategy):
                 if current_bid >= tp_threshold:
                     trigger     = "TP"
                     exit_intent = "ORDER_INTENT_BUY_LONG"
-                    exit_price  = max(0.01, round(current_bid - 0.02, 4))
+                    exit_price  = max(0.01, round(current_bid, 4))
                 elif current_bid <= sl_threshold:
                     trigger     = "SL"
                     exit_intent = "ORDER_INTENT_BUY_LONG"
-                    exit_price  = max(0.01, round(current_bid - 0.02, 4))
+                    exit_price  = max(0.01, round(current_bid, 4))
 
             elif intent == "ORDER_INTENT_BUY_SHORT":
-                entry_no     = round(1.0 - entry_price, 4)
+                entry_no     = round(entry_price, 4)
                 current_no_bid = round(1.0 - current_ask, 4)
                 is_nc = strategy in _NEAR_CERTAINTY_STRATEGIES
                 tp_threshold = (_NEAR_CERTAINTY_TP_THRESHOLD if is_nc
@@ -291,11 +291,11 @@ class PositionMonitorStrategy(BaseStrategy):
                 if current_no_bid >= tp_threshold:
                     trigger     = "TP"
                     exit_intent = "ORDER_INTENT_BUY_SHORT"
-                    exit_price  = max(0.01, round(current_no_bid - 0.02, 4))
+                    exit_price  = max(0.01, round(current_no_bid, 4))
                 elif current_no_bid <= sl_threshold:
                     trigger     = "SL"
                     exit_intent = "ORDER_INTENT_BUY_SHORT"
-                    exit_price  = max(0.01, round(current_no_bid - 0.02, 4))
+                    exit_price  = max(0.01, round(current_no_bid, 4))
 
             if not trigger:
                 continue
@@ -303,7 +303,7 @@ class PositionMonitorStrategy(BaseStrategy):
             pnl_est = (
                 (current_bid - entry_price) * quantity
                 if intent == "ORDER_INTENT_BUY_LONG"
-                else (round(1.0 - current_ask, 4) - round(1.0 - entry_price, 4)) * quantity
+                else (round(1.0 - current_ask, 4) - entry_price) * quantity
             )
 
             self.log(
