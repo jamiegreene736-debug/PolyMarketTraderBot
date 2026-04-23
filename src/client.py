@@ -278,6 +278,7 @@ class PolymarketClient:
                 f"signer={self.signer_address}, funder={self.funder_address or self.signer_address}, "
                 f"observed_balance=${balance:.2f})"
             )
+            await self._refresh_api_creds()
             return
 
         self._client = probe_client
@@ -287,6 +288,33 @@ class PolymarketClient:
             "Polymarket CLOB client connected "
             f"(dry_run={self.dry_run}, mode=EOA, signer={self.signer_address})"
         )
+        await self._refresh_api_creds()
+
+    async def _refresh_api_creds(self):
+        """
+        Re-derive API credentials from the active signer on startup. Polymarket's
+        quickstart recommends createOrDeriveApiKey() when signature errors are
+        suspected, and this keeps the HMAC creds aligned with the current signer.
+        Falls back to the env-provided creds if derivation is unavailable.
+        """
+        try:
+            derived = await asyncio.to_thread(self._client.create_or_derive_api_creds)
+            if not derived:
+                raise RuntimeError("create_or_derive_api_creds returned no credentials")
+
+            await asyncio.to_thread(self._client.set_api_creds, derived)
+            self.api_key = derived.api_key
+            self.api_secret = derived.api_secret
+            self.api_passphrase = derived.api_passphrase
+            logger.info(
+                "CLOB API credentials refreshed from signer "
+                f"(key={self.api_key[:8]}..., mode={self._sig_label(self.signature_type)})"
+            )
+        except Exception as e:
+            logger.warning(
+                "CLOB API credential refresh failed; continuing with configured env creds: "
+                f"{e}"
+            )
 
     async def setup_allowances(self):
         """
