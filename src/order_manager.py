@@ -149,13 +149,34 @@ class OrderManager:
         for oid in order_ids:
             await self.cancel_order(oid)
 
-    async def cancel_stale_orders(self, market_slug: str, current_mid: float, max_drift: float = 0.05):
-        """Cancel orders that have drifted more than max_drift from current mid price."""
+    async def cancel_stale_orders(
+        self,
+        market_slug: str,
+        current_mid: float,
+        max_drift: float = 0.05,
+    ):
+        """
+        Cancel orders that have drifted too far from the current fair price.
+
+        BUY_LONG orders are priced in YES terms, so we compare them to the YES mid.
+        BUY_SHORT orders are priced in NO terms, so we compare them to the NO mid.
+        """
         order_ids = list(self._market_orders.get(market_slug, []))
         for oid in order_ids:
             order = self._open_orders.get(oid)
-            if order and abs(order["price"] - current_mid) > max_drift:
-                logger.debug(f"Cancelling stale order {oid} (price={order['price']}, mid={current_mid})")
+            if not order:
+                continue
+
+            intent = str(order.get("intent") or "")
+            reference_price = current_mid
+            if intent == "ORDER_INTENT_BUY_SHORT":
+                reference_price = max(0.01, min(0.99, round(1.0 - current_mid, 4)))
+
+            if abs(order["price"] - reference_price) > max_drift:
+                logger.debug(
+                    f"Cancelling stale order {oid} "
+                    f"(price={order['price']}, ref={reference_price}, intent={intent})"
+                )
                 await self.cancel_order(oid)
 
     async def mark_filled(self, order_id: str, pnl: float = 0.0):
