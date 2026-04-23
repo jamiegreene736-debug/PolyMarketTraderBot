@@ -571,6 +571,35 @@
     toastTimer = setTimeout(() => { toast.className = ''; }, 3000);
   }
 
+  function formatCountdown(seconds) {
+    if (!Number.isFinite(seconds) || seconds <= 0) return 'expired';
+    if (seconds < 60) return Math.floor(seconds) + 's';
+    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + Math.floor(seconds % 60) + 's';
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${hours}h ${minutes}m ${secs}s`;
+  }
+
+  function tickPositionTimers() {
+    const now = Date.now() / 1000;
+
+    document.querySelectorAll('[data-placed-at-ts]').forEach(el => {
+      const placedAt = parseFloat(el.dataset.placedAtTs || '0');
+      if (!placedAt) return;
+      el.textContent = formatCountdown(now - placedAt);
+    });
+
+    document.querySelectorAll('[data-force-exit-at-ts]').forEach(el => {
+      const forceExitAt = parseFloat(el.dataset.forceExitAtTs || '0');
+      if (!forceExitAt) return;
+      const remaining = forceExitAt - now;
+      const base = formatCountdown(remaining);
+      const maxLabel = el.dataset.maxHoldLabel || '';
+      el.innerHTML = `${base}${maxLabel ? `<div style="color:#64748b; font-size:11px; margin-top:2px;">max ${maxLabel}</div>` : ''}`;
+    });
+  }
+
   // ── Balance + Open Positions ────────────────────────────────────────────
   async function refreshPositions() {
     try {
@@ -609,8 +638,12 @@
             <td><span style="color:${sideColor}; font-weight:600;">${label}</span></td>
             <td>$${parseFloat(p.price).toFixed(4)}</td>
             <td>${parseFloat(p.quantity).toFixed(1)}</td>
-            <td>${p.age_label || '—'}</td>
-            <td title="${p.force_exit_at || ''}">
+            <td data-placed-at-ts="${p.placed_at_ts || 0}">${p.age_label || '—'}</td>
+            <td
+              title="${p.force_exit_at || ''}"
+              data-force-exit-at-ts="${p.force_exit_at_ts || 0}"
+              data-max-hold-label="${p.max_hold_label || ''}"
+            >
               ${p.force_exit_in_label || '—'}
               ${p.max_hold_label && p.max_hold_label !== '—' ? `<div style="color:#64748b; font-size:11px; margin-top:2px;">max ${p.max_hold_label}</div>` : ''}
             </td>
@@ -618,6 +651,7 @@
             <td>${actionCell}</td>
           </tr>`;
       }).join('');
+      tickPositionTimers();
     } catch (e) { /* silent */ }
   }
 
@@ -648,6 +682,7 @@
   // Poll positions every 5 seconds
   refreshPositions();
   setInterval(refreshPositions, 5000);
+  setInterval(tickPositionTimers, 1000);
 
   // ── Circuit Breaker ─────────────────────────────────────────────────────
 

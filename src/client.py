@@ -614,21 +614,31 @@ class PolymarketClient:
             logger.warning(f"get_balance failed: {e}")
             return {"balance": 0.0, "availableBalance": 0.0}
 
-    async def get_positions(self) -> list:
-        user = (self.funder_address or self.signer_address or "").strip()
+    async def get_positions(
+        self,
+        user: str | None = None,
+        markets: list[str] | None = None,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list:
+        user = (user or self.funder_address or self.signer_address or "").strip()
         if not user:
             return []
 
         try:
+            params = {
+                "user": user,
+                "sizeThreshold": 0,
+                "limit": min(max(limit, 1), 500),
+                "offset": max(offset, 0),
+                "sortBy": "CURRENT",
+                "sortDirection": "DESC",
+            }
+            if markets:
+                params["market"] = ",".join(markets)
             resp = await self._http.get(
                 f"{DATA_API}/positions",
-                params={
-                    "user": user,
-                    "sizeThreshold": 0,
-                    "limit": 500,
-                    "sortBy": "CURRENT",
-                    "sortDirection": "DESC",
-                },
+                params=params,
             )
             resp.raise_for_status()
             raw = resp.json()
@@ -639,21 +649,30 @@ class PolymarketClient:
             logger.warning(f"get_positions failed: {e}")
             return []
 
-    async def get_closed_positions(self, limit: int = 50, offset: int = 0) -> list:
-        user = (self.funder_address or self.signer_address or "").strip()
+    async def get_closed_positions(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        user: str | None = None,
+        markets: list[str] | None = None,
+    ) -> list:
+        user = (user or self.funder_address or self.signer_address or "").strip()
         if not user:
             return []
 
         try:
+            params = {
+                "user": user,
+                "limit": min(max(limit, 1), 50),
+                "offset": max(offset, 0),
+                "sortBy": "TIMESTAMP",
+                "sortDirection": "DESC",
+            }
+            if markets:
+                params["market"] = ",".join(markets)
             resp = await self._http.get(
                 f"{DATA_API}/closed-positions",
-                params={
-                    "user": user,
-                    "limit": min(max(limit, 1), 50),
-                    "offset": max(offset, 0),
-                    "sortBy": "TIMESTAMP",
-                    "sortDirection": "DESC",
-                },
+                params=params,
             )
             resp.raise_for_status()
             raw = resp.json()
@@ -662,6 +681,77 @@ class PolymarketClient:
             return positions
         except Exception as e:
             logger.warning(f"get_closed_positions failed: {e}")
+            return []
+
+    async def get_trades(
+        self,
+        *,
+        markets: list[str] | None = None,
+        user: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+        taker_only: bool = True,
+        side: str | None = None,
+        filter_type: str | None = None,
+        filter_amount: float | None = None,
+    ) -> list:
+        params = {
+            "limit": min(max(limit, 1), 10_000),
+            "offset": max(offset, 0),
+            "takerOnly": str(bool(taker_only)).lower(),
+        }
+        if markets:
+            params["market"] = ",".join(markets)
+        if user:
+            params["user"] = user
+        if side:
+            params["side"] = side
+        if filter_type and filter_amount is not None:
+            params["filterType"] = filter_type
+            params["filterAmount"] = max(float(filter_amount), 0.0)
+
+        try:
+            resp = await self._http.get(f"{DATA_API}/trades", params=params)
+            resp.raise_for_status()
+            raw = resp.json()
+            trades = raw if isinstance(raw, list) else []
+            logger.info(
+                f"get_trades: {len(trades)} rows "
+                f"(markets={len(markets or [])}, user={user or 'any'})"
+            )
+            return trades
+        except Exception as e:
+            logger.warning(f"get_trades failed: {e}")
+            return []
+
+    async def get_top_holders(
+        self,
+        markets: list[str],
+        *,
+        limit: int = 20,
+        min_balance: int = 1,
+    ) -> list:
+        if not markets:
+            return []
+
+        try:
+            resp = await self._http.get(
+                f"{DATA_API}/holders",
+                params={
+                    "market": ",".join(markets),
+                    "limit": min(max(limit, 1), 20),
+                    "minBalance": max(int(min_balance), 0),
+                },
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+            holders = raw if isinstance(raw, list) else []
+            logger.info(
+                f"get_top_holders: {len(holders)} token groups for {len(markets)} markets"
+            )
+            return holders
+        except Exception as e:
+            logger.warning(f"get_top_holders failed: {e}")
             return []
 
     async def get_activities(self) -> list:

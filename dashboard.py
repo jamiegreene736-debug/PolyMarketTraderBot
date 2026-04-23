@@ -631,10 +631,17 @@ async def api_positions(_=Depends(verify_password)):
     cash = float(cash_data.get("availableBalance") or cash_data.get("balance") or 0.0)
 
     raw_positions = await _client_ref.get_positions()
-    local_position_refs = _order_manager.get_open_positions() if _order_manager is not None else []
+    local_position_refs = await db.get_open_trade_rows()
+    if _order_manager is not None:
+        # In-memory state can carry a fresher strategy label, but the DB rows are
+        # the durable source of placed_at/timestamp after fills and restarts.
+        local_position_refs.extend(_order_manager.get_open_positions())
+
     local_by_market_side: dict[tuple[str, str], list[dict]] = {}
     for ref in local_position_refs:
         key = (str(ref.get("market_slug") or "").strip().lower(), str(ref.get("intent") or ""))
+        if not key[1]:
+            key = (key[0], str(ref.get("side") or ""))
         if key[0]:
             local_by_market_side.setdefault(key, []).append(ref)
 
@@ -650,23 +657,39 @@ async def api_positions(_=Depends(verify_password)):
             candidates = local_by_market_side.get((match_key, intent), [])
             if candidates:
                 local_match = candidates.pop(0)
+        if local_match is None:
+            title_key = str(p.get("title") or "").strip().lower()
+            if title_key:
+                candidates = local_by_market_side.get((title_key, intent), [])
+                if candidates:
+                    local_match = candidates.pop(0)
         avg_price = float(p.get("avgPrice") or 0.0)
         size = float(p.get("size") or 0.0)
         current_value = float(p.get("currentValue") or (avg_price * size) or 0.0)
         strategy = (local_match or {}).get("strategy") or "live position"
         placed_at = (local_match or {}).get("placed_at")
+        if placed_at is None:
+            raw_timestamp = (local_match or {}).get("timestamp")
+            if raw_timestamp:
+                try:
+                    placed_at = datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    placed_at = None
         age_seconds = None
         if placed_at is not None:
             try:
-                age_seconds = max(0.0, now - float(placed_at))
+                placed_at = float(placed_at)
+                age_seconds = max(0.0, now - placed_at)
             except (TypeError, ValueError):
                 age_seconds = None
+                placed_at = None
         max_hold_seconds = _max_hold_seconds(strategy)
         force_exit_at = None
         force_exit_in = None
         if age_seconds is not None and max_hold_seconds is not None:
-            force_exit_in = max_hold_seconds - age_seconds
-            force_exit_at = datetime.utcfromtimestamp(float(placed_at) + max_hold_seconds).isoformat()
+            force_exit_at_ts = float(placed_at) + max_hold_seconds
+            force_exit_in = force_exit_at_ts - now
+            force_exit_at = datetime.utcfromtimestamp(force_exit_at_ts).isoformat()
         positions.append({
             "order_id": "",
             "market_slug": market_slug,
@@ -680,6 +703,8 @@ async def api_positions(_=Depends(verify_password)):
             "closable": False,
             "age_label": _format_age_label(age_seconds),
             "max_hold_label": _format_age_label(max_hold_seconds),
+            "placed_at_ts": placed_at or 0,
+            "max_hold_seconds": max_hold_seconds or 0,
             "force_exit_in_label": (
                 "expired"
                 if force_exit_in is not None and force_exit_in <= 0
@@ -688,6 +713,7 @@ async def api_positions(_=Depends(verify_password)):
                 else "—"
             ),
             "force_exit_at": force_exit_at or "",
+            "force_exit_at_ts": force_exit_at_ts if age_seconds is not None and max_hold_seconds is not None else 0,
         })
 
     position_value = sum(p["current_value"] for p in positions)

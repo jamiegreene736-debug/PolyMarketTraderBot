@@ -85,6 +85,24 @@ strategies:
     enabled: true
     capital_pct: 15                  # 15% of portfolio for momentum trades
     order_size_usdc: 5               # Meets 5-share floor at all prices ≤$1 (scaled for $36 balance)
+    max_trades_per_day: 10           # Hard cap — focus on only the best whale-led moves
+    wallet_refresh_seconds: 1800     # Re-rank wallets every 30 minutes
+    top_holder_markets: 40           # Candidate markets used to discover elite wallets
+    top_holders_per_market: 5        # Pull only the biggest holders per market
+    max_ranked_wallets: 150          # Score up to 150 wallets per refresh cycle
+    wallet_closed_positions_limit: 20
+    wallet_rank_concurrency: 12
+    min_wallet_closed_trades: 3
+    min_ranked_wallet_win_rate: 0.50
+    min_wallet_score: 70             # Only follow wallets with strong realized P&L + hit rate
+    recent_trade_window_seconds: 900 # Only copy fresh whale prints from the last 15 minutes
+    recent_trades_fetch_limit: 300
+    min_whale_trade_usdc: 250        # Ignore tiny prints — only follow meaningful size
+    trade_signal_cooldown_seconds: 1800
+    min_holder_balance: 1
+    min_market_price: 0.10
+    max_market_price: 0.90
+    fallback_to_momentum: true       # Keep legacy signal path if ranked wallet flow is quiet
     min_move_pct: 0.05               # 5% price move triggers entry
     lookback_ticks: 8                # Compare to 8 ticks ago (~2 min at 15s/tick)
     top_markets: 300                 # Raised from 30 → 300: NBA MVP markets dominate top 30 at <10¢,

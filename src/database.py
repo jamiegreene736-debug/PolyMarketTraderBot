@@ -168,6 +168,40 @@ async def get_open_trades_metadata() -> dict[str, dict]:
     return {row["order_id"]: dict(row) for row in rows}
 
 
+async def get_open_trade_rows() -> list[dict]:
+    """
+    Return all trades still marked open.
+    Used for rebuilding live position metadata after fills/restarts, even when
+    the original order is no longer present in the in-memory order tracker.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT order_id, strategy, question, market_slug, side, price, quantity, timestamp "
+            "FROM trades WHERE status = 'open' ORDER BY timestamp ASC"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def count_trades_today(strategy: str | None = None) -> int:
+    """
+    Count trades inserted today in UTC, optionally filtered by strategy.
+    """
+    today = datetime.utcnow().date().isoformat()
+    query = "SELECT COUNT(*) as count FROM trades WHERE timestamp LIKE ?"
+    params: tuple = (f"{today}%",)
+    if strategy:
+        query += " AND strategy = ?"
+        params = (f"{today}%", strategy)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, params) as cur:
+            row = await cur.fetchone()
+    return int(row["count"] if row else 0)
+
+
 async def get_dashboard_stats() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
