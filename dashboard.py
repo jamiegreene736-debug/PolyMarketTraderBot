@@ -458,6 +458,19 @@ def _max_hold_seconds(strategy: str) -> float | None:
         return None
 
 
+def _infer_strategy_from_live_position(outcome: str, avg_price: float) -> str:
+    cfg = load_config().get("strategies", {})
+    near_min = float(cfg.get("near_certainty", {}).get("min_price", 0.93))
+    inv_yes_max = float(cfg.get("inverted_near_certainty", {}).get("max_yes_price", 0.07))
+    inv_no_min = max(0.0, 1.0 - inv_yes_max)
+
+    if outcome == "YES" and avg_price >= near_min:
+        return "near_certainty"
+    if outcome == "NO" and avg_price >= inv_no_min:
+        return "inverted_near_certainty"
+    return "live position"
+
+
 async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
     if _client_ref is None:
         return []
@@ -646,7 +659,8 @@ async def api_positions(_=Depends(verify_password)):
     cash_data = await _client_ref.get_balance()
     cash = float(cash_data.get("availableBalance") or cash_data.get("balance") or 0.0)
 
-    raw_positions = await _client_ref.get_positions()
+    user_address = (_client_ref.funder_address or _client_ref.signer_address or "").strip()
+    raw_positions = await _client_ref.get_positions(user=user_address)
     local_position_refs = await db.get_open_trade_rows()
     if _order_manager is not None:
         # In-memory state can carry a fresher strategy label, but the DB rows are
@@ -663,9 +677,38 @@ async def api_positions(_=Depends(verify_password)):
             if market_key:
                 local_by_market_side.setdefault((market_key, side_key), []).append(ref)
 
+    condition_ids = [
+        str(p.get("conditionId") or "").strip()
+        for p in raw_positions
+        if p.get("conditionId")
+    ]
+    latest_buy_by_market_outcome: dict[tuple[str, str], float] = {}
+    if user_address and condition_ids:
+        trade_rows = await _client_ref.get_trades(
+            user=user_address,
+            markets=condition_ids,
+            limit=min(max(len(condition_ids) * 20, 50), 1000),
+            taker_only=False,
+            side="BUY",
+        )
+        for trade in trade_rows:
+            market_id = str(trade.get("conditionId") or "").strip()
+            outcome_key = str(trade.get("outcome") or "").upper()
+            if not market_id or not outcome_key:
+                continue
+            try:
+                ts = float(trade.get("timestamp") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if ts > 1_000_000_000_000:
+                ts /= 1000.0
+            key = (market_id, outcome_key)
+            latest_buy_by_market_outcome[key] = max(latest_buy_by_market_outcome.get(key, 0.0), ts)
+
     now = datetime.utcnow().timestamp()
     positions = []
     for p in raw_positions:
+        condition_id = str(p.get("conditionId") or "").strip()
         outcome = str(p.get("outcome") or "").upper()
         intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
         market_slug = p.get("slug") or p.get("title") or "—"
@@ -684,7 +727,7 @@ async def api_positions(_=Depends(verify_password)):
         avg_price = float(p.get("avgPrice") or 0.0)
         size = float(p.get("size") or 0.0)
         current_value = float(p.get("currentValue") or (avg_price * size) or 0.0)
-        strategy = (local_match or {}).get("strategy") or "live position"
+        strategy = (local_match or {}).get("strategy") or _infer_strategy_from_live_position(outcome, avg_price)
         placed_at = (local_match or {}).get("placed_at")
         if placed_at is None:
             raw_timestamp = (local_match or {}).get("timestamp")
@@ -693,6 +736,8 @@ async def api_positions(_=Depends(verify_password)):
                     placed_at = datetime.fromisoformat(str(raw_timestamp).replace("Z", "+00:00")).timestamp()
                 except Exception:
                     placed_at = None
+        if placed_at is None and condition_id and outcome:
+            placed_at = latest_buy_by_market_outcome.get((condition_id, outcome))
         age_seconds = None
         if placed_at is not None:
             try:
