@@ -34,6 +34,7 @@ class CircuitBreaker:
 
         # State
         self.session_start_balance  = start_balance
+        self.session_start_at       = datetime.now(timezone.utc)
         self.day_start_balance      = start_balance
         self._today_date            = datetime.now(timezone.utc).date()
 
@@ -114,6 +115,7 @@ class CircuitBreaker:
         self._consecutive_losses = 0
         self._order_timestamps.clear()
         self.session_start_balance = current_balance
+        self.session_start_at = datetime.now(timezone.utc)
         logger.info(f"Circuit breaker reset. New session balance: ${current_balance:.2f}")
 
     @property

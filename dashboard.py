@@ -267,10 +267,16 @@ async def run_bot_loop():
 
                 # ── Circuit breaker check ─────────────────────────────────
                 try:
-                    recent_closed = await _get_live_closed_positions(limit=20)
+                    recent_closed = await _get_live_closed_positions(limit=150)
+                    session_start_ts = (
+                        _circuit_breaker.session_start_at.timestamp()
+                        if _circuit_breaker is not None
+                        else 0.0
+                    )
                     recent_pnls = [
                         _safe_float(pos.get("realizedPnl"))
                         for pos in recent_closed
+                        if _polymarket_ts_seconds(pos.get("timestamp")) >= session_start_ts
                     ]
                 except Exception:
                     recent_pnls = []
@@ -532,6 +538,13 @@ def _live_closed_summary(closed_positions: list[dict]) -> dict:
         "total_trades": total_closed,
         "trades_today": trades_today,
     }
+
+
+def _polymarket_ts_seconds(value) -> float:
+    ts = _safe_float(value)
+    if ts > 1_000_000_000_000:
+        ts /= 1000.0
+    return ts
 
 
 async def _reconcile_live_capital_allocations(
