@@ -31,6 +31,7 @@ import re
 from datetime import datetime
 from src.strategies.base import BaseStrategy
 from src import database as db
+from py_clob_client.order_builder.constants import SELL
 
 
 # Strategies whose orders are managed elsewhere (not TP/SL monitored).
@@ -246,22 +247,20 @@ class PositionMonitorStrategy(BaseStrategy):
                     trigger  = f"MAX_HOLD_SOFT({age_hours:.1f}h,try{attempts})"
                     exit_tif = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
                     if intent == "ORDER_INTENT_BUY_LONG":
-                        exit_intent = "ORDER_INTENT_BUY_SHORT"
-                        # Fair NO price at current bid; no 2¢ haircut.
-                        exit_price  = max(0.01, round(1.0 - current_bid, 4))
-                    else:
                         exit_intent = "ORDER_INTENT_BUY_LONG"
-                        exit_price  = min(0.99, current_ask)
+                        exit_price  = max(0.01, round(current_bid, 4))
+                    else:
+                        exit_intent = "ORDER_INTENT_BUY_SHORT"
+                        exit_price  = max(0.01, round(1.0 - current_ask, 4))
                 else:
                     trigger  = f"MAX_HOLD_HARD({age_hours:.1f}h,try{attempts})"
                     exit_tif = "TIME_IN_FORCE_FILL_OR_KILL"
                     if intent == "ORDER_INTENT_BUY_LONG":
-                        exit_intent = "ORDER_INTENT_BUY_SHORT"
-                        no_price    = round(1.0 - current_bid, 4)
-                        exit_price  = max(0.01, no_price - 0.02)
-                    else:
                         exit_intent = "ORDER_INTENT_BUY_LONG"
-                        exit_price  = min(0.99, current_ask + 0.02)
+                        exit_price  = max(0.01, round(current_bid - 0.02, 4))
+                    else:
+                        exit_intent = "ORDER_INTENT_BUY_SHORT"
+                        exit_price  = max(0.01, round((1.0 - current_ask) - 0.02, 4))
 
                 self._exit_attempts[order_id] = (first_attempt_ts, attempts)
 
@@ -274,14 +273,12 @@ class PositionMonitorStrategy(BaseStrategy):
 
                 if current_bid >= tp_threshold:
                     trigger     = "TP"
-                    exit_intent = "ORDER_INTENT_BUY_SHORT"
-                    no_price    = round(1.0 - current_bid, 4)
-                    exit_price  = max(0.01, no_price - 0.02)
+                    exit_intent = "ORDER_INTENT_BUY_LONG"
+                    exit_price  = max(0.01, round(current_bid - 0.02, 4))
                 elif current_bid <= sl_threshold:
                     trigger     = "SL"
-                    exit_intent = "ORDER_INTENT_BUY_SHORT"
-                    no_price    = round(1.0 - current_bid, 4)
-                    exit_price  = max(0.01, no_price - 0.02)
+                    exit_intent = "ORDER_INTENT_BUY_LONG"
+                    exit_price  = max(0.01, round(current_bid - 0.02, 4))
 
             elif intent == "ORDER_INTENT_BUY_SHORT":
                 entry_no     = round(1.0 - entry_price, 4)
@@ -293,12 +290,12 @@ class PositionMonitorStrategy(BaseStrategy):
 
                 if current_no_bid >= tp_threshold:
                     trigger     = "TP"
-                    exit_intent = "ORDER_INTENT_BUY_LONG"
-                    exit_price  = min(0.99, current_ask + 0.02)
+                    exit_intent = "ORDER_INTENT_BUY_SHORT"
+                    exit_price  = max(0.01, round(current_no_bid - 0.02, 4))
                 elif current_no_bid <= sl_threshold:
                     trigger     = "SL"
-                    exit_intent = "ORDER_INTENT_BUY_LONG"
-                    exit_price  = min(0.99, current_ask + 0.02)
+                    exit_intent = "ORDER_INTENT_BUY_SHORT"
+                    exit_price  = max(0.01, round(current_no_bid - 0.02, 4))
 
             if not trigger:
                 continue
@@ -330,6 +327,7 @@ class PositionMonitorStrategy(BaseStrategy):
                 price=exit_price,
                 quantity=exit_qty,
                 strategy=self.name,
+                execution_side=SELL,
                 tif=exit_tif,
             )
 

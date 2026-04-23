@@ -26,7 +26,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds, OrderArgs, BalanceAllowanceParams, AssetType, OpenOrderParams,
 )
-from py_clob_client.order_builder.constants import BUY
+from py_clob_client.order_builder.constants import BUY, SELL
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
@@ -795,6 +795,7 @@ class PolymarketClient:
         intent: str,
         price: float,
         quantity: float,
+        side: str = BUY,
         order_type: str = "ORDER_TYPE_LIMIT",
         tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL",
     ) -> dict:
@@ -822,7 +823,7 @@ class PolymarketClient:
             token_id = token_id,
             price    = round(float(price), 4),
             size     = float(quantity),
-            side     = BUY,
+            side     = side,
         )
         raw    = await asyncio.to_thread(self._client.create_and_post_order, args)
         result = raw if isinstance(raw, dict) else (vars(raw) if hasattr(raw, "__dict__") else {})
@@ -830,7 +831,7 @@ class PolymarketClient:
             result.get("orderID") or result.get("order_id") or result.get("id") or ""
         )
         logger.info(
-            f"Order placed: {intent} {quantity:.1f}x @ ${price:.4f} "
+            f"Order placed: {intent} {side} {quantity:.1f}x @ ${price:.4f} "
             f"on {market_slug} → id={oid}"
         )
         return {"id": oid, "raw": result}

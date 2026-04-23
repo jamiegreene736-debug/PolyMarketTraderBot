@@ -3,6 +3,7 @@ import time
 from loguru import logger
 from src.client import PolymarketClient
 from src import database as db
+from py_clob_client.order_builder.constants import BUY
 
 
 # Polymarket CLOB enforces a 5-share minimum per order. Orders below this
@@ -31,6 +32,7 @@ class OrderManager:
 
     async def place_order(self, market_slug: str, question: str, intent: str,
                           price: float, quantity: float, strategy: str,
+                          execution_side: str = BUY,
                           tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL") -> str | None:
         async with self._lock:
             if len(self._open_orders) >= self.max_concurrent:
@@ -78,6 +80,7 @@ class OrderManager:
                 intent=intent,
                 price=price,
                 quantity=quantity,
+                side=execution_side,
                 tif=tif,
             )
             order_id = result.get("id")
@@ -92,6 +95,7 @@ class OrderManager:
                     "order_id": order_id,
                     "market_slug": market_slug,
                     "intent": intent,
+                    "execution_side": execution_side,
                     "price": price,
                     "quantity": quantity,
                     "strategy": strategy,
@@ -99,7 +103,10 @@ class OrderManager:
                 }
                 self._market_orders.setdefault(market_slug, []).append(order_id)
 
-            msg = f"[order] PLACED {intent} {quantity:.1f}x @ ${price:.4f} on '{question[:40]}' id={order_id}"
+            msg = (
+                f"[order] PLACED {intent} {execution_side} {quantity:.1f}x "
+                f"@ ${price:.4f} on '{question[:40]}' id={order_id}"
+            )
             logger.info(msg)
             await db.log_to_db("INFO", msg)
 
