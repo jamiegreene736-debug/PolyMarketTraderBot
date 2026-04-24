@@ -50,6 +50,8 @@ _NEAR_CERTAINTY_INFER_THRESHOLD = 0.93
 # at the fair price (no overpay). After this many seconds of unfilled
 # passive attempts, we escalate to aggressive taker.
 _SOFT_EXIT_GRACE_SECONDS = 180        # 3 minutes
+_DEFAULT_PENDING_EXIT_STALE_SECONDS = 300
+_DEFAULT_HARD_EXIT_RETRY_SECONDS = 60
 
 
 class PositionMonitorStrategy(BaseStrategy):
@@ -58,6 +60,7 @@ class PositionMonitorStrategy(BaseStrategy):
         super().__init__(*args, **kwargs)
         # attempt_key → (first_attempt_ts, attempt_count)
         self._exit_attempts: dict[str, tuple[float, int]] = {}
+        self._hard_exit_last_attempt: dict[str, float] = {}
 
     def _normalize_market_key(self, value: str | None) -> str:
         raw = (value or "").strip().lower()
@@ -178,6 +181,12 @@ class PositionMonitorStrategy(BaseStrategy):
         tp_pct    = self.config.get("take_profit_pct", 0.15)
         sl_pct    = self.config.get("stop_loss_pct", 0.08)
         exit_size = self.config.get("exit_size_usdc", 200)
+        pending_exit_stale_seconds = float(
+            self.config.get("pending_exit_stale_seconds", _DEFAULT_PENDING_EXIT_STALE_SECONDS)
+        )
+        hard_exit_retry_seconds = float(
+            self.config.get("hard_exit_retry_seconds", _DEFAULT_HARD_EXIT_RETRY_SECONDS)
+        )
 
         # Per-strategy max hold times (hours → seconds). None = no limit.
         hold_cfg  = self.config.get("max_hold_hours", {})
@@ -218,6 +227,7 @@ class PositionMonitorStrategy(BaseStrategy):
             strategy    = pos.get("strategy", "")
             placed_at   = pos.get("placed_at", now)
             age_hours   = (now - placed_at) / 3600
+            attempt_key = order_id or f"{slug}:{intent}"
             if pos.get("override_active"):
                 continue
 
@@ -244,7 +254,6 @@ class PositionMonitorStrategy(BaseStrategy):
                 # taker. Previously every MAX_HOLD ate a guaranteed 2¢ haircut.
                 overdue_seconds = max(0.0, (now - placed_at) - mhs)
                 default_first_attempt = now - min(overdue_seconds, _SOFT_EXIT_GRACE_SECONDS)
-                attempt_key = order_id or f"{slug}:{intent}"
                 first_attempt_ts, attempts = self._exit_attempts.get(
                     attempt_key, (default_first_attempt, 0)
                 )
@@ -263,7 +272,10 @@ class PositionMonitorStrategy(BaseStrategy):
                         exit_price  = max(0.01, round(1.0 - current_ask, 4))
                 else:
                     trigger  = f"MAX_HOLD_HARD({age_hours:.1f}h,try{attempts})"
-                    exit_tif = "TIME_IN_FORCE_FILL_OR_KILL"
+                    # Fill-and-kill takes whatever liquidity is available and
+                    # cancels the remainder. That avoids another immortal exit
+                    # order while still reducing risk if the book is thin.
+                    exit_tif = "TIME_IN_FORCE_FILL_AND_KILL"
                     if intent == "ORDER_INTENT_BUY_LONG":
                         exit_intent = "ORDER_INTENT_BUY_LONG"
                         exit_price  = max(0.01, round(current_bid - 0.02, 4))
@@ -325,13 +337,42 @@ class PositionMonitorStrategy(BaseStrategy):
             if pending_exit:
                 pending_qty = float(pending_exit.get("quantity") or 0.0)
                 pending_price = float(pending_exit.get("price") or 0.0)
+                pending_placed_at = float(pending_exit.get("placed_at") or now)
+                pending_age = max(0.0, now - pending_placed_at)
                 pending_id = str(pending_exit.get("order_id") or "")[:12]
-                self.log(
-                    f"Exit already pending for {slug} ({trigger}) — "
-                    f"{pending_qty:.1f}x @ ${pending_price:.4f} id={pending_id}; "
-                    "not placing a duplicate sell order"
-                )
-                continue
+                if pending_age >= pending_exit_stale_seconds:
+                    stale_id = str(pending_exit.get("order_id") or "")
+                    self.log(
+                        f"Pending exit stale for {slug} ({pending_age/60:.1f}m old) — "
+                        f"canceling {pending_id} and retrying as fill-and-kill"
+                    )
+                    cancelled = await self.order_manager.cancel_order(stale_id)
+                    if not cancelled:
+                        self.log(
+                            f"Could not cancel stale pending exit {pending_id} for {slug}; "
+                            "not placing a duplicate exit",
+                            level="warning",
+                        )
+                        continue
+                    exit_tif = "TIME_IN_FORCE_FILL_AND_KILL"
+                    trigger = f"{trigger}_STALE_RETRY"
+                else:
+                    self.log(
+                        f"Exit already pending for {slug} ({trigger}) — "
+                        f"{pending_qty:.1f}x @ ${pending_price:.4f} id={pending_id}; "
+                        "not placing a duplicate sell order"
+                    )
+                    continue
+
+            if exit_tif == "TIME_IN_FORCE_FILL_AND_KILL":
+                last_hard_attempt = self._hard_exit_last_attempt.get(attempt_key, 0.0)
+                if now - last_hard_attempt < hard_exit_retry_seconds:
+                    self.log(
+                        f"Hard exit retry cooling down for {slug}; "
+                        f"next attempt in {hard_exit_retry_seconds - (now - last_hard_attempt):.0f}s"
+                    )
+                    continue
+                self._hard_exit_last_attempt[attempt_key] = now
 
             # Release the capital that was locked when the entry was placed.
             # For live account positions we no longer rely on an open entry order

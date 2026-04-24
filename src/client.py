@@ -25,6 +25,7 @@ from loguru import logger
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import (
     ApiCreds, OrderArgs, BalanceAllowanceParams, AssetType, OpenOrderParams,
+    OrderType,
 )
 from py_clob_client.order_builder.constants import BUY, SELL
 
@@ -859,10 +860,12 @@ class PolymarketClient:
     ) -> dict:
         if self.dry_run:
             fake_id = f"dry_run_{market_slug}_{intent}_{price:.4f}"
+            order_type = self._order_type_from_tif(tif)
             logger.info(
-                f"[DRY RUN] {intent} {quantity:.1f}x @ ${price:.4f} on {market_slug}"
+                f"[DRY RUN] {intent} {quantity:.1f}x @ ${price:.4f} "
+                f"type={order_type} on {market_slug}"
             )
-            return {"id": fake_id}
+            return {"id": fake_id, "order_type": order_type}
 
         tokens = await self._ensure_tokens(market_slug)
         if not tokens:
@@ -883,16 +886,23 @@ class PolymarketClient:
             size     = float(quantity),
             side     = side,
         )
-        raw    = await asyncio.to_thread(self._client.create_and_post_order, args)
+        order_type = self._order_type_from_tif(tif)
+        signed_order = await asyncio.to_thread(self._client.create_order, args)
+        raw = await asyncio.to_thread(
+            self._client.post_order,
+            signed_order,
+            orderType=order_type,
+        )
         result = raw if isinstance(raw, dict) else (vars(raw) if hasattr(raw, "__dict__") else {})
         oid    = (
             result.get("orderID") or result.get("order_id") or result.get("id") or ""
         )
         logger.info(
             f"Order placed: {intent} {side} {quantity:.1f}x @ ${price:.4f} "
+            f"type={order_type} "
             f"on {market_slug} → id={oid}"
         )
-        return {"id": oid, "asset_id": token_id, "raw": result}
+        return {"id": oid, "asset_id": token_id, "order_type": order_type, "raw": result}
 
     async def cancel_order(self, order_id: str, market_slug: str = "") -> bool:
         if self.dry_run:
@@ -917,6 +927,22 @@ class PolymarketClient:
         except Exception as e:
             logger.warning(f"cancel_all_orders: {e}")
             return False
+
+    @staticmethod
+    def _order_type_from_tif(tif: str) -> OrderType:
+        value = str(tif or "").upper()
+        if value in {"FOK", "TIME_IN_FORCE_FILL_OR_KILL"}:
+            return OrderType.FOK
+        if value in {
+            "FAK",
+            "IOC",
+            "TIME_IN_FORCE_FILL_AND_KILL",
+            "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL",
+        }:
+            return OrderType.FAK
+        if value in {"GTD", "TIME_IN_FORCE_GOOD_TILL_DATE"}:
+            return OrderType.GTD
+        return OrderType.GTC
 
     @staticmethod
     def _safe_float(value, default: float = 0.0) -> float:

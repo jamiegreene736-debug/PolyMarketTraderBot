@@ -109,6 +109,17 @@ class OrderManager:
                 await db.log_to_db("WARNING", msg)
                 return None
 
+            order_type = str(result.get("order_type") or "").upper()
+            is_resting_order = order_type not in {"FOK", "FAK"}
+            if not is_resting_order:
+                msg = (
+                    f"[order] SUBMITTED {intent} {execution_side} {quantity:.1f}x "
+                    f"@ ${price:.4f} type={order_type} on '{question[:40]}' id={order_id}"
+                )
+                logger.info(msg)
+                await db.log_to_db("INFO", msg)
+                return order_id
+
             async with self._lock:
                 self._open_orders[order_id] = {
                     "order_id": order_id,

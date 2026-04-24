@@ -137,6 +137,8 @@ strategies:
     take_profit_pct: 0.02            # Exit on any 2% gain — fast capital recycling on tight-spread markets
     stop_loss_pct: 0.05              # Exit when position is down 5% — tight stops
     exit_size_usdc: 200              # Max USDC per exit order
+    pending_exit_stale_seconds: 300  # Cancel/retry resting exits that sit unfilled for 5 minutes
+    hard_exit_retry_seconds: 60      # Avoid hammering CLOB when a market has no bid to sell into
     max_hold_hours:                  # Force-exit after this many hours (per strategy)
       whale_tracker: 0.5             # Momentum fades fast — 30 min hard cap
       ai_trader: 1                   # AI edge should realize inside an hour or it's wrong

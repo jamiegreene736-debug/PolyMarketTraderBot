@@ -378,6 +378,21 @@ async def test_order_manager():
         await om.mark_filled("order-xyz-456", pnl=5.0)
         check("mark_filled removes order", om.get_total_open_orders() == 0)
 
+        # Immediate exit attempts (FAK/FOK) should not become immortal open rows.
+        mock_client.place_order = AsyncMock(return_value={"id": "exit-fak-789", "order_type": "FAK"})
+        oid5 = await om.place_order(
+            market_slug="will-btc-hit-100k",
+            question="Will BTC hit $100k?",
+            intent="ORDER_INTENT_BUY_LONG",
+            price=0.01,
+            quantity=50.0,
+            strategy="position_monitor",
+            execution_side="SELL",
+            tif="TIME_IN_FORCE_FILL_AND_KILL",
+        )
+        check("FAK exit submit returns order_id", oid5 == "exit-fak-789", f"got {oid5!r}")
+        check("FAK exit is not tracked as resting open order", om.get_total_open_orders() == 0)
+
     finally:
         try:
             os.unlink(db_module.DB_PATH)
@@ -386,6 +401,17 @@ async def test_order_manager():
         db_module.DB_PATH = original_path
 
 asyncio.run(test_order_manager())
+
+
+def test_order_type_mapping():
+    from src.client import PolymarketClient
+    from py_clob_client.clob_types import OrderType
+
+    check("client maps GTC tif", PolymarketClient._order_type_from_tif("TIME_IN_FORCE_GOOD_TILL_CANCEL") == OrderType.GTC)
+    check("client maps FAK tif", PolymarketClient._order_type_from_tif("TIME_IN_FORCE_FILL_AND_KILL") == OrderType.FAK)
+    check("client maps FOK tif", PolymarketClient._order_type_from_tif("TIME_IN_FORCE_FILL_OR_KILL") == OrderType.FOK)
+
+test_order_type_mapping()
 
 
 async def test_open_order_token_hydration():
