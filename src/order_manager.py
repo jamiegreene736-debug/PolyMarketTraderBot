@@ -38,12 +38,14 @@ class OrderManager:
                           price: float, quantity: float, strategy: str,
                           execution_side: str = BUY,
                           tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL") -> str | None:
+        is_buy_order = str(execution_side or BUY).upper() != "SELL"
+
         async with self._lock:
-            if len(self._open_orders) >= self.max_concurrent:
+            if is_buy_order and len(self._open_orders) >= self.max_concurrent:
                 logger.warning(f"Max concurrent orders ({self.max_concurrent}) reached, skipping")
                 return None
 
-            if self._is_duplicate(market_slug, intent, price, strategy):
+            if is_buy_order and self._is_duplicate(market_slug, intent, price, strategy):
                 logger.debug(f"Duplicate order skipped: {intent} @ {price} on {market_slug}")
                 return None
 
@@ -60,21 +62,22 @@ class OrderManager:
             return None
 
         notional = max(0.0, float(price or 0.0) * float(quantity or 0.0))
-        available_for_orders = self.get_available_order_capacity_usdc()
-        if available_for_orders is not None and notional > available_for_orders:
-            msg = (
-                f"[order] WAIT {intent} on {market_slug}: notional ${notional:.2f} "
-                f"exceeds exchange-safe capacity ${available_for_orders:.2f} "
-                f"(tracked active orders=${self.get_open_order_notional_usdc():.2f})."
-            )
-            logger.info(msg)
-            await db.log_to_db("INFO", msg)
-            return None
+        if is_buy_order:
+            available_for_orders = self.get_available_order_capacity_usdc()
+            if available_for_orders is not None and notional > available_for_orders:
+                msg = (
+                    f"[order] WAIT {intent} on {market_slug}: notional ${notional:.2f} "
+                    f"exceeds exchange-safe capacity ${available_for_orders:.2f} "
+                    f"(tracked active orders=${self.get_open_order_notional_usdc():.2f})."
+                )
+                logger.info(msg)
+                await db.log_to_db("INFO", msg)
+                return None
 
         # Liquidity gate: skip thin markets where we can't get in/out without
         # moving price against ourselves. Uses the market's `liquidity` field
         # as a proxy for total book depth.
-        if self.market_data is not None and self.min_liquidity_multiple > 0:
+        if is_buy_order and self.market_data is not None and self.min_liquidity_multiple > 0:
             liquidity = self.market_data.get_market_liquidity(market_slug)
             required = notional * self.min_liquidity_multiple
             # Skip the check if the market has no liquidity metadata at all
