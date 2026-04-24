@@ -135,23 +135,40 @@ async def run_bot_loop():
 
     # Fetch real balance at startup so capital manager is accurate from tick 1
     startup_balance = 0.0
+    startup_balance_timeout = float(bot_cfg.get("startup_balance_timeout_seconds", 20))
     try:
-        balance_data = await client.get_balance()
+        msg = f"Startup: fetching exchange balance (timeout={startup_balance_timeout:.0f}s)"
+        logger.info(msg)
+        await db.log_to_db("INFO", msg)
+        balance_data = await asyncio.wait_for(
+            client.get_balance(),
+            timeout=startup_balance_timeout,
+        )
         for key in ("availableBalance", "balance", "usdc", "availableUsdc", "cashBalance"):
             val = balance_data.get(key)
             if val is not None:
                 startup_balance = float(val)
                 break
-        logger.info(f"Startup balance: ${startup_balance:.2f} USDC")
+        msg = f"Startup balance: ${startup_balance:.2f} USDC"
+        logger.info(msg)
+        await db.log_to_db("INFO", msg)
+    except asyncio.TimeoutError:
+        msg = f"Startup balance fetch timed out after {startup_balance_timeout:.0f}s; continuing with fallback balance"
+        logger.warning(msg)
+        await db.log_to_db("WARNING", msg)
     except Exception as e:
-        logger.warning(f"Could not fetch startup balance: {e}")
+        msg = f"Could not fetch startup balance: {e}"
+        logger.warning(msg)
+        await db.log_to_db("WARNING", msg)
 
     dry_run = bot_cfg.get("dry_run", False)
 
     # In dry-run mode, use a realistic test balance if the real balance is $0
     if dry_run and startup_balance < 1.0:
         startup_balance = 36.0
-        logger.info(f"Dry-run: using simulated $36 balance for strategy testing")
+        msg = "Dry-run: using simulated $36 balance for strategy testing"
+        logger.info(msg)
+        await db.log_to_db("INFO", msg)
 
     # In live mode, the CLOB's get_balance_allowance may return $0 for
     # email/magic-link accounts whose funds are held in a Gnosis Safe proxy
@@ -164,12 +181,16 @@ async def run_bot_loop():
         if override:
             try:
                 startup_balance = float(override)
-                logger.warning(
+                msg = (
                     f"CLOB returned $0 balance — using POLY_STARTING_BALANCE override: "
                     f"${startup_balance:.2f}. Orders will be validated by the exchange."
                 )
+                logger.warning(msg)
+                await db.log_to_db("WARNING", msg)
             except ValueError:
-                logger.warning(f"Invalid POLY_STARTING_BALANCE value: {override!r}")
+                msg = f"Invalid POLY_STARTING_BALANCE value: {override!r}"
+                logger.warning(msg)
+                await db.log_to_db("WARNING", msg)
 
     capital = CapitalManager(
         total_usdc=startup_balance,
@@ -219,8 +240,31 @@ async def run_bot_loop():
     poll_interval = bot_cfg.get("poll_interval_seconds", 30)
     balance_refresh_counter = 0
 
-    # Restore open positions from exchange on every startup
-    await order_manager.sync_from_exchange()
+    # Restore open positions from exchange on every startup, but do not let a
+    # slow CLOB call keep the dashboard stuck at "CLOB auth" forever.
+    startup_sync_timeout = float(bot_cfg.get("startup_sync_timeout_seconds", 25))
+    try:
+        msg = f"Startup: syncing open exchange orders (timeout={startup_sync_timeout:.0f}s)"
+        logger.info(msg)
+        await db.log_to_db("INFO", msg)
+        await asyncio.wait_for(
+            order_manager.sync_from_exchange(),
+            timeout=startup_sync_timeout,
+        )
+    except asyncio.TimeoutError:
+        msg = f"Startup exchange-order sync timed out after {startup_sync_timeout:.0f}s; halting start to avoid trading with incomplete state"
+        _bot_state["status"] = "error"
+        _bot_state["last_error"] = msg
+        logger.warning(msg)
+        await db.log_to_db("WARNING", msg)
+        return
+    except Exception as e:
+        msg = f"Startup exchange-order sync failed: {e}"
+        _bot_state["status"] = "error"
+        _bot_state["last_error"] = msg
+        logger.warning(msg)
+        await db.log_to_db("WARNING", msg)
+        return
 
     msg = f"Bot started — active strategies: {[s.name for s in enabled]}"
     logger.info(msg)
@@ -237,7 +281,10 @@ async def run_bot_loop():
                 # circuit breaker against the simulated $36 startup balance.
                 if balance_refresh_counter % 10 == 0 and not dry_run:
                     try:
-                        balance_data = await client.get_balance()
+                        balance_data = await asyncio.wait_for(
+                            client.get_balance(),
+                            timeout=float(bot_cfg.get("balance_refresh_timeout_seconds", 15)),
+                        )
                         for key in ("availableBalance", "balance", "usdc", "availableUsdc", "cashBalance"):
                             val = balance_data.get(key)
                             if val is not None:

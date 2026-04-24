@@ -218,11 +218,15 @@ class OrderManager:
         try:
             raw_orders = await self.client.get_open_orders()
         except Exception as e:
-            logger.warning(f"sync_from_exchange: could not fetch open orders: {e}")
-            return 0
+            msg = f"sync_from_exchange: could not fetch open orders: {e}"
+            logger.warning(msg)
+            await db.log_to_db("WARNING", msg)
+            raise RuntimeError(msg) from e
 
         if not raw_orders:
-            logger.info("sync_from_exchange: no open orders on exchange")
+            msg = "sync_from_exchange: no open orders on exchange"
+            logger.info(msg)
+            await db.log_to_db("INFO", "[order_manager] Startup sync: no open orders on exchange")
             return 0
 
         # Load DB metadata so we can restore strategy/question

@@ -3,6 +3,9 @@ bot:
   dry_run: false                     # LIVE — real money, real orders, real fills
   auto_start: false                  # Don't auto-start on server boot — require manual Start click
   max_concurrent_orders: 10         # Scaled for $36 balance — room for ~5 entries + ~5 exits in flight
+  startup_balance_timeout_seconds: 20
+  startup_sync_timeout_seconds: 25
+  balance_refresh_timeout_seconds: 15
   log_level: INFO
 
 ai_observer:
