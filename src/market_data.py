@@ -34,6 +34,16 @@ class MarketData:
         if force or (now - self._markets_fetched_at) > self._markets_ttl:
             try:
                 raw = await self.client.get_markets()
+                if not raw and self._markets_cache:
+                    msg = (
+                        f"Market refresh returned no data; preserving "
+                        f"{len(self._markets_cache)} cached active market(s)"
+                    )
+                    logger.warning(msg)
+                    await db.log_to_db("WARNING", msg)
+                    self._markets_fetched_at = now
+                    return self._markets_cache
+
                 # Filter to only active, non-closed, non-archived markets
                 self._markets_cache = [
                     m for m in raw

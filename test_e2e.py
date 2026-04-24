@@ -132,9 +132,16 @@ check("release restores availability",
 size = cap.kelly_size("near_certainty", win_prob=0.95, net_return_pct=0.06, kelly_fraction=0.25)
 check("kelly_size returns float > 0", isinstance(size, float) and size > 0, f"size={size}")
 
-size_zero_edge = cap.kelly_size("near_certainty", win_prob=0.50, net_return_pct=0.00, kelly_fraction=0.25)
+min_kelly_size = 1.0
+size_zero_edge = cap.kelly_size(
+    "near_certainty",
+    win_prob=0.50,
+    net_return_pct=0.00,
+    kelly_fraction=0.25,
+    min_size=min_kelly_size,
+)
 check("kelly_size with zero edge returns min_size",
-      size_zero_edge == 10.0, f"size={size_zero_edge}")
+      size_zero_edge == min_kelly_size, f"size={size_zero_edge}")
 
 cap2 = CapitalManager(total_usdc=10.0, strategy_config=cfg, reserve_pct=10)
 tiny = cap2.kelly_size("near_certainty", win_prob=0.95, net_return_pct=0.06)

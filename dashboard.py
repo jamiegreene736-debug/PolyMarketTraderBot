@@ -143,6 +143,7 @@ async def run_bot_loop():
 
     # Fetch real balance at startup so capital manager is accurate from tick 1
     startup_balance = 0.0
+    startup_balance_available = False
     startup_balance_timeout = float(bot_cfg.get("startup_balance_timeout_seconds", 20))
     try:
         msg = f"Startup: fetching exchange balance (timeout={startup_balance_timeout:.0f}s)"
@@ -156,6 +157,7 @@ async def run_bot_loop():
             val = balance_data.get(key)
             if val is not None:
                 startup_balance = float(val)
+                startup_balance_available = True
                 break
         msg = f"Startup balance: ${startup_balance:.2f} USDC"
         logger.info(msg)
@@ -202,6 +204,16 @@ async def run_bot_loop():
                 msg = f"Invalid POLY_STARTING_BALANCE value: {override!r}"
                 logger.warning(msg)
                 await db.log_to_db("WARNING", msg)
+        elif not startup_balance_available:
+            msg = (
+                "Startup balance unavailable from CLOB; pausing bot instead of "
+                "starting with a fake $0 balance. Check upstream connectivity and retry Start."
+            )
+            _bot_state["status"] = "error"
+            _bot_state["last_error"] = msg
+            logger.warning(msg)
+            await db.log_to_db("WARNING", msg)
+            return
 
     capital = CapitalManager(
         total_usdc=startup_balance,
@@ -250,6 +262,7 @@ async def run_bot_loop():
     position_monitor = next((s for s in enabled if s.name == "position_monitor"), None)
     poll_interval = bot_cfg.get("poll_interval_seconds", 30)
     balance_refresh_counter = 0
+    market_data_failures = 0
 
     # Restore open positions from exchange on every startup, but do not let a
     # slow CLOB call keep the dashboard stuck at "CLOB auth" forever.
@@ -370,8 +383,44 @@ async def run_bot_loop():
                 logger.info(tick_msg)
                 await db.log_to_db("INFO", tick_msg)
 
+                try:
+                    market_snapshot = await asyncio.wait_for(
+                        market_data.get_markets(),
+                        timeout=float(bot_cfg.get("market_refresh_timeout_seconds", 18)),
+                    )
+                except Exception as e:
+                    market_snapshot = []
+                    msg = f"Market data preflight failed: {e}"
+                    logger.warning(msg)
+                    await db.log_to_db("WARNING", msg)
+
+                entries_paused = not bool(market_snapshot)
+                if entries_paused:
+                    market_data_failures += 1
+                    msg = (
+                        "Market data unavailable; skipping new-entry strategies this tick "
+                        f"(failure {market_data_failures}/3)."
+                    )
+                    _bot_state["last_error"] = msg
+                    logger.warning(msg)
+                    await db.log_to_db("WARNING", msg)
+                    if market_data_failures >= 3:
+                        msg = (
+                            "Polymarket market/data APIs unavailable for 3 consecutive ticks; "
+                            "pausing bot to avoid trading against empty/stale market data."
+                        )
+                        _bot_state["status"] = "error"
+                        _bot_state["last_error"] = msg
+                        logger.warning(msg)
+                        await db.log_to_db("WARNING", msg)
+                        break
+                else:
+                    market_data_failures = 0
+
                 for s in enabled:
                     try:
+                        if entries_paused and s.name != "position_monitor":
+                            continue
                         await s.run()
                     except Exception as e:
                         msg = f"[{s.name}] crashed: {e}"
@@ -394,7 +443,8 @@ async def run_bot_loop():
                     )
 
                 _bot_state["last_heartbeat"] = datetime.utcnow().isoformat()
-                _bot_state["last_error"] = None
+                if not entries_paused:
+                    _bot_state["last_error"] = None
 
             except Exception as e:
                 _bot_state["last_error"] = str(e)
@@ -449,6 +499,10 @@ async def _auto_restart_bot():
             # User explicitly stopped it — don't restart, just wait
             logger.info("Bot stopped by user — supervisor idle, waiting for manual start")
             while _bot_state.get("status") == "stopped":
+                await asyncio.sleep(5)
+        elif _bot_state.get("status") == "error":
+            logger.warning("Bot entered error state — supervisor idle, waiting for manual Start")
+            while _bot_state.get("status") == "error":
                 await asyncio.sleep(5)
         else:
             logger.warning("Bot crashed — restarting in 10s...")
@@ -595,7 +649,7 @@ async def _get_cached_balance(max_age_seconds: float = 30.0) -> float:
 
     if _client_ref is not None:
         try:
-            cash_data = await asyncio.wait_for(_client_ref.get_balance(), timeout=8.0)
+            cash_data = await asyncio.wait_for(_client_ref.get_balance(), timeout=3.0)
             cash = _safe_float(
                 cash_data.get("availableBalance")
                 or cash_data.get("balance")
@@ -628,7 +682,7 @@ async def _get_cached_live_positions(user_address: str, max_age_seconds: float =
         try:
             positions = await asyncio.wait_for(
                 _client_ref.get_positions(user=user_address),
-                timeout=8.0,
+                timeout=3.0,
             )
             if positions:
                 _account_cache["positions"] = positions
@@ -700,7 +754,7 @@ async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
                     limit=min(50, limit - len(positions)),
                     offset=offset,
                 ),
-                timeout=8.0,
+                timeout=3.0,
             )
         except Exception as e:
             logger.warning(f"Dashboard closed-position refresh failed, using cached rows: {e}")

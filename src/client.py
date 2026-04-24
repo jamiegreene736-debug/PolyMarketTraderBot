@@ -69,6 +69,12 @@ class PolymarketClient:
         self._slug_tokens: dict[str, dict] = {}
         # condition_id → slug (reverse map for syncing open orders)
         self._cid_to_slug: dict[str, str] = {}
+        # Last-known-good snapshots. During upstream API hiccups, callers should
+        # see stale-but-real account data instead of dangerous zero/empty values.
+        self._last_balance: dict | None = None
+        self._last_markets: list[dict] = []
+        self._last_positions: dict[tuple, list] = {}
+        self._last_closed_positions: dict[tuple, list] = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -472,7 +478,12 @@ class PolymarketClient:
                 page: list = resp.json()
             except Exception as e:
                 logger.error(f"Gamma get_markets failed (offset={offset}): {type(e).__name__}: {e!r}")
-                break
+                if self._last_markets:
+                    logger.warning(
+                        f"Gamma get_markets using {len(self._last_markets)} cached market(s) after upstream failure"
+                    )
+                    return list(self._last_markets)
+                raise
 
             if not page:
                 break
@@ -485,6 +496,8 @@ class PolymarketClient:
                 break
             offset += limit
 
+        if all_markets:
+            self._last_markets = list(all_markets)
         logger.info(f"get_markets: {len(all_markets)} markets from Gamma API")
         return all_markets
 
@@ -609,10 +622,14 @@ class PolymarketClient:
 
             bal = self._extract_balance_usdc(raw)
             logger.info(f"get_balance: ${bal:.2f} USDC")
-            return {"balance": bal, "availableBalance": bal}
+            self._last_balance = {"balance": bal, "availableBalance": bal}
+            return dict(self._last_balance)
         except Exception as e:
             logger.warning(f"get_balance failed: {type(e).__name__}: {e!r}")
-            return {"balance": 0.0, "availableBalance": 0.0}
+            if self._last_balance is not None:
+                logger.warning("get_balance using cached balance after upstream failure")
+                return {**self._last_balance, "stale": True}
+            raise
 
     async def get_positions(
         self,
@@ -624,6 +641,7 @@ class PolymarketClient:
         user = (user or self.funder_address or self.signer_address or "").strip()
         if not user:
             return []
+        cache_key = (user.lower(), tuple(sorted(markets or [])), min(max(limit, 1), 500), max(offset, 0))
 
         try:
             params = {
@@ -643,10 +661,17 @@ class PolymarketClient:
             resp.raise_for_status()
             raw = resp.json()
             positions = raw if isinstance(raw, list) else []
+            self._last_positions[cache_key] = list(positions)
             logger.info(f"get_positions: {len(positions)} live positions for {user}")
             return positions
         except Exception as e:
             logger.warning(f"get_positions failed: {type(e).__name__}: {e!r}")
+            if cache_key in self._last_positions:
+                cached = self._last_positions[cache_key]
+                logger.warning(
+                    f"get_positions using {len(cached)} cached position(s) after upstream failure"
+                )
+                return list(cached)
             return []
 
     async def get_closed_positions(
@@ -659,6 +684,7 @@ class PolymarketClient:
         user = (user or self.funder_address or self.signer_address or "").strip()
         if not user:
             return []
+        cache_key = (user.lower(), tuple(sorted(markets or [])), min(max(limit, 1), 50), max(offset, 0))
 
         try:
             params = {
@@ -677,10 +703,17 @@ class PolymarketClient:
             resp.raise_for_status()
             raw = resp.json()
             positions = raw if isinstance(raw, list) else []
+            self._last_closed_positions[cache_key] = list(positions)
             logger.info(f"get_closed_positions: {len(positions)} closed positions for {user}")
             return positions
         except Exception as e:
             logger.warning(f"get_closed_positions failed: {type(e).__name__}: {e!r}")
+            if cache_key in self._last_closed_positions:
+                cached = self._last_closed_positions[cache_key]
+                logger.warning(
+                    f"get_closed_positions using {len(cached)} cached row(s) after upstream failure"
+                )
+                return list(cached)
             return []
 
     async def get_trades(
