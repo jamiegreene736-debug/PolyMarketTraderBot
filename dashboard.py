@@ -60,6 +60,14 @@ _circuit_breaker: "CircuitBreaker | None" = None
 _client_ref: "PolymarketClient | None" = None
 _market_data_ref: "MarketData | None" = None
 _ai_observer: "AIObserver | None" = None
+_account_cache = {
+    "balance": 0.0,
+    "balance_ts": 0.0,
+    "positions": [],
+    "positions_ts": 0.0,
+    "closed_positions": [],
+    "closed_positions_ts": 0.0,
+}
 
 
 def load_config() -> dict:
@@ -152,6 +160,9 @@ async def run_bot_loop():
         msg = f"Startup balance: ${startup_balance:.2f} USDC"
         logger.info(msg)
         await db.log_to_db("INFO", msg)
+        if startup_balance > 0:
+            _account_cache["balance"] = startup_balance
+            _account_cache["balance_ts"] = asyncio.get_event_loop().time()
     except asyncio.TimeoutError:
         msg = f"Startup balance fetch timed out after {startup_balance_timeout:.0f}s; continuing with fallback balance"
         logger.warning(msg)
@@ -294,6 +305,8 @@ async def run_bot_loop():
                                 # keeping the override prevents a false circuit-breaker trip.
                                 if balance > 0:
                                     capital.update_balance(balance)
+                                    _account_cache["balance"] = balance
+                                    _account_cache["balance_ts"] = asyncio.get_event_loop().time()
                                 # Snapshot against exchange-truth realized P&L, not local
                                 # placeholder close rows from earlier buggy exit paths.
                                 try:
@@ -573,18 +586,125 @@ def _infer_strategy_from_live_position(outcome: str, avg_price: float) -> str:
     return "live position"
 
 
+async def _get_cached_balance(max_age_seconds: float = 30.0) -> float:
+    now = asyncio.get_event_loop().time()
+    cached = _safe_float(_account_cache.get("balance"))
+    cached_ts = _safe_float(_account_cache.get("balance_ts"))
+    if cached > 0 and now - cached_ts <= max_age_seconds:
+        return cached
+
+    if _client_ref is not None:
+        try:
+            cash_data = await asyncio.wait_for(_client_ref.get_balance(), timeout=8.0)
+            cash = _safe_float(
+                cash_data.get("availableBalance")
+                or cash_data.get("balance")
+                or cash_data.get("usdc")
+                or cash_data.get("availableUsdc")
+                or cash_data.get("cashBalance")
+            )
+            if cash > 0:
+                _account_cache["balance"] = cash
+                _account_cache["balance_ts"] = now
+                return cash
+        except Exception as e:
+            logger.warning(f"Dashboard balance refresh failed, using cached balance: {e}")
+
+    if cached > 0:
+        return cached
+    if _capital is not None and _capital.total_usdc > 0:
+        return float(_capital.total_usdc)
+    return 0.0
+
+
+async def _get_cached_live_positions(user_address: str, max_age_seconds: float = 30.0) -> list[dict]:
+    now = asyncio.get_event_loop().time()
+    cached = list(_account_cache.get("positions") or [])
+    cached_ts = _safe_float(_account_cache.get("positions_ts"))
+    if cached and now - cached_ts <= max_age_seconds:
+        return cached
+
+    if _client_ref is not None:
+        try:
+            positions = await asyncio.wait_for(
+                _client_ref.get_positions(user=user_address),
+                timeout=8.0,
+            )
+            if positions:
+                _account_cache["positions"] = positions
+                _account_cache["positions_ts"] = now
+                return positions
+        except Exception as e:
+            logger.warning(f"Dashboard position refresh failed, using cached positions: {e}")
+
+    if cached:
+        return cached
+    return []
+
+
+def _open_order_position_fallback() -> list[dict]:
+    if _order_manager is None:
+        return []
+
+    rows = []
+    now = datetime.utcnow().timestamp()
+    for order in _order_manager.get_open_positions():
+        price = _safe_float(order.get("price"))
+        quantity = _safe_float(order.get("quantity"))
+        placed_at = _safe_float(order.get("placed_at"))
+        strategy = order.get("strategy") or "open_order"
+        intent = str(order.get("intent") or "")
+        rows.append({
+            "order_id": order.get("order_id") or "",
+            "market_slug": order.get("market_slug") or "—",
+            "title": order.get("question") or order.get("market_slug") or "—",
+            "condition_id": "",
+            "intent": intent,
+            "price": price,
+            "quantity": quantity,
+            "current_value": 0.0,
+            "cost_basis": round(price * quantity, 2),
+            "outcome": "YES" if "BUY_LONG" in intent else "NO" if "BUY_SHORT" in intent else "—",
+            "strategy": strategy,
+            "closable": True,
+            "estimated_pnl": 0.0,
+            "override_active": False,
+            "age_label": _format_age_label(max(0.0, now - placed_at) if placed_at else None),
+            "max_hold_label": "—",
+            "placed_at_ts": placed_at or 0,
+            "max_hold_seconds": 0,
+            "force_exit_in_label": "resting order",
+            "force_exit_at": "",
+            "force_exit_at_ts": 0,
+        })
+    return rows
+
+
 async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
     if _client_ref is None:
         return []
+
+    now = asyncio.get_event_loop().time()
+    cached = list(_account_cache.get("closed_positions") or [])
+    cached_ts = _safe_float(_account_cache.get("closed_positions_ts"))
+    if cached and now - cached_ts <= 45:
+        return cached[:limit]
 
     positions: list[dict] = []
     offset = 0
 
     while len(positions) < limit:
-        batch = await _client_ref.get_closed_positions(
-            limit=min(50, limit - len(positions)),
-            offset=offset,
-        )
+        try:
+            batch = await asyncio.wait_for(
+                _client_ref.get_closed_positions(
+                    limit=min(50, limit - len(positions)),
+                    offset=offset,
+                ),
+                timeout=8.0,
+            )
+        except Exception as e:
+            logger.warning(f"Dashboard closed-position refresh failed, using cached rows: {e}")
+            return cached[:limit]
         if not batch:
             break
         positions.extend(batch)
@@ -592,6 +712,12 @@ async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
             break
         offset += len(batch)
 
+    if positions:
+        _account_cache["closed_positions"] = positions
+        _account_cache["closed_positions_ts"] = now
+        return positions
+    if cached:
+        return cached[:limit]
     return positions
 
 
@@ -695,7 +821,11 @@ async def dashboard(_=Depends(verify_password)):
     stats = await db.get_dashboard_stats()
     if _client_ref is not None:
         try:
-            stats["open_positions"] = len(await _client_ref.get_positions())
+            user_address = (_client_ref.funder_address or _client_ref.signer_address or "").strip()
+            live_positions = await _get_cached_live_positions(user_address)
+            stats["open_positions"] = len(live_positions) or (
+                _order_manager.get_total_open_orders() if _order_manager is not None else 0
+            )
         except Exception:
             pass
         try:
@@ -712,7 +842,11 @@ async def api_stats(_=Depends(verify_password)):
     stats = await db.get_dashboard_stats()
     if _client_ref is not None:
         try:
-            stats["open_positions"] = len(await _client_ref.get_positions())
+            user_address = (_client_ref.funder_address or _client_ref.signer_address or "").strip()
+            live_positions = await _get_cached_live_positions(user_address)
+            stats["open_positions"] = len(live_positions) or (
+                _order_manager.get_total_open_orders() if _order_manager is not None else 0
+            )
         except Exception:
             pass
         try:
@@ -859,6 +993,14 @@ async def api_reset_data(_=Depends(verify_password)):
         _order_manager.clear()
     if _capital is not None:
         _capital._allocated.clear()
+    _account_cache.update({
+        "balance": 0.0,
+        "balance_ts": 0.0,
+        "positions": [],
+        "positions_ts": 0.0,
+        "closed_positions": [],
+        "closed_positions_ts": 0.0,
+    })
     logger.info("All data reset via dashboard (DB + in-memory)")
     return {"ok": True}
 
@@ -886,18 +1028,36 @@ async def api_auto_close_override(payload: dict, _=Depends(verify_password)):
 async def api_positions(_=Depends(verify_password)):
     """Return live Polymarket positions with balance breakdown."""
     if _client_ref is None:
-        return {"positions": [], "cash_balance": 0, "position_value": 0, "total": 0}
-
-    cash_data = await _client_ref.get_balance()
-    cash = float(cash_data.get("availableBalance") or cash_data.get("balance") or 0.0)
+        cash = float(_capital.total_usdc) if _capital is not None else 0.0
+        positions = _open_order_position_fallback()
+        position_value = sum(p["current_value"] for p in positions)
+        return {
+            "positions": positions,
+            "cash_balance": round(cash, 2),
+            "position_value": round(position_value, 2),
+            "total": round(cash + position_value, 2),
+            "source": "local",
+        }
 
     user_address = (_client_ref.funder_address or _client_ref.signer_address or "").strip()
-    raw_positions = await _client_ref.get_positions(user=user_address)
+    cash = await _get_cached_balance()
+    raw_positions = await _get_cached_live_positions(user_address)
     local_position_refs = await db.get_open_trade_rows()
     if _order_manager is not None:
         # In-memory state can carry a fresher strategy label, but the DB rows are
         # the durable source of placed_at/timestamp after fills and restarts.
         local_position_refs.extend(_order_manager.get_open_positions())
+
+    if not raw_positions and _order_manager is not None and _order_manager.get_total_open_orders() > 0:
+        positions = _open_order_position_fallback()
+        position_value = sum(p["current_value"] for p in positions)
+        return {
+            "positions": positions,
+            "cash_balance": round(cash, 2),
+            "position_value": round(position_value, 2),
+            "total": round(cash + position_value, 2),
+            "source": "local_open_orders",
+        }
 
     local_by_market_side: dict[tuple[str, str], list[dict]] = {}
     for ref in local_position_refs:
@@ -1048,6 +1208,7 @@ async def api_positions(_=Depends(verify_password)):
         "cash_balance": round(cash, 2),
         "position_value": round(position_value, 2),
         "total": round(total, 2),
+        "source": "live",
     }
 
 

@@ -772,7 +772,8 @@
       document.getElementById('cashBalance').textContent    = '$' + data.cash_balance.toFixed(2);
       document.getElementById('positionValue').textContent  = '$' + data.position_value.toFixed(2);
       document.getElementById('totalBalance').textContent   = '$' + data.total.toFixed(2);
-      document.getElementById('positionCount').textContent  = data.positions.length + ' live position' + (data.positions.length !== 1 ? 's' : '');
+      const positionLabel = data.source === 'local_open_orders' ? ' open order' : ' live position';
+      document.getElementById('positionCount').textContent  = data.positions.length + positionLabel + (data.positions.length !== 1 ? 's' : '');
       const opEl = document.getElementById('statOpenPositions');
       if (opEl) opEl.textContent = data.positions.length;
 
@@ -784,7 +785,7 @@
       }
 
       tbody.innerHTML = data.positions.map(p => {
-        const cost      = (p.current_value ?? (p.price * p.quantity)).toFixed(2);
+        const cost      = (p.cost_basis ?? p.current_value ?? (p.price * p.quantity)).toFixed(2);
         const sideColor = p.intent.includes('BUY_LONG') ? '#60a5fa' : '#f87171';
         const label     = p.outcome || (p.intent.includes('BUY_LONG') ? 'YES' : 'NO');
         const market    = p.title || p.market_slug || '—';

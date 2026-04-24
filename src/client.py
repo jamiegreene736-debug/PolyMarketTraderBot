@@ -471,7 +471,7 @@ class PolymarketClient:
                 resp.raise_for_status()
                 page: list = resp.json()
             except Exception as e:
-                logger.error(f"Gamma get_markets failed (offset={offset}): {e}")
+                logger.error(f"Gamma get_markets failed (offset={offset}): {type(e).__name__}: {e!r}")
                 break
 
             if not page:
@@ -611,7 +611,7 @@ class PolymarketClient:
             logger.info(f"get_balance: ${bal:.2f} USDC")
             return {"balance": bal, "availableBalance": bal}
         except Exception as e:
-            logger.warning(f"get_balance failed: {e}")
+            logger.warning(f"get_balance failed: {type(e).__name__}: {e!r}")
             return {"balance": 0.0, "availableBalance": 0.0}
 
     async def get_positions(
@@ -646,7 +646,7 @@ class PolymarketClient:
             logger.info(f"get_positions: {len(positions)} live positions for {user}")
             return positions
         except Exception as e:
-            logger.warning(f"get_positions failed: {e}")
+            logger.warning(f"get_positions failed: {type(e).__name__}: {e!r}")
             return []
 
     async def get_closed_positions(
@@ -680,7 +680,7 @@ class PolymarketClient:
             logger.info(f"get_closed_positions: {len(positions)} closed positions for {user}")
             return positions
         except Exception as e:
-            logger.warning(f"get_closed_positions failed: {e}")
+            logger.warning(f"get_closed_positions failed: {type(e).__name__}: {e!r}")
             return []
 
     async def get_trades(
@@ -721,7 +721,7 @@ class PolymarketClient:
             )
             return trades
         except Exception as e:
-            logger.warning(f"get_trades failed: {e}")
+            logger.warning(f"get_trades failed: {type(e).__name__}: {e!r}")
             return []
 
     async def get_top_holders(
@@ -784,7 +784,7 @@ class PolymarketClient:
                 })
             return result
         except Exception as e:
-            logger.warning(f"get_open_orders failed: {e}")
+            logger.warning(f"get_open_orders failed: {type(e).__name__}: {e!r}")
             return []
 
     async def place_order(
