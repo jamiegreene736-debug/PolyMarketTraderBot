@@ -113,6 +113,7 @@ class OrderManager:
                 self._open_orders[order_id] = {
                     "order_id": order_id,
                     "market_slug": market_slug,
+                    "asset_id": result.get("asset_id") or "",
                     "intent": intent,
                     "execution_side": execution_side,
                     "price": price,
@@ -303,6 +304,7 @@ class OrderManager:
                 self._open_orders[order_id] = {
                     "order_id": order_id,
                     "market_slug": slug,
+                    "asset_id": o.get("asset_id") or "",
                     "intent": intent,
                     "execution_side": execution_side,
                     "price": price,

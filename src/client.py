@@ -799,10 +799,32 @@ class PolymarketClient:
         try:
             raw    = await asyncio.to_thread(self._client.get_orders, OpenOrderParams())
             orders = raw if isinstance(raw, list) else (raw or {}).get("data", []) or []
+            raw_dicts = [
+                o if isinstance(o, dict) else (vars(o) if hasattr(o, "__dict__") else {})
+                for o in orders
+            ]
+
+            # Startup sync happens before strategy market refresh. Hydrate the
+            # slug/token cache first so restored SELL exits are matched to the
+            # same market/outcome as the live position instead of looking like
+            # anonymous token orders.
+            needs_token_hydration = any(
+                asset_id and not self._asset_id_to_slug(asset_id)
+                for od in raw_dicts
+                for asset_id in [str(
+                    od.get("asset_id") or od.get("assetId")
+                    or od.get("token_id") or od.get("tokenId") or ""
+                )]
+            )
+            if needs_token_hydration:
+                await self.get_markets()
+
             result = []
-            for o in orders:
-                od       = o if isinstance(o, dict) else (vars(o) if hasattr(o, "__dict__") else {})
-                asset_id = str(od.get("asset_id") or od.get("assetId") or "")
+            for od in raw_dicts:
+                asset_id = str(
+                    od.get("asset_id") or od.get("assetId")
+                    or od.get("token_id") or od.get("tokenId") or ""
+                )
                 slug     = self._asset_id_to_slug(asset_id) or asset_id
                 oid      = od.get("id") or od.get("orderId") or od.get("order_id") or ""
                 if not oid:
@@ -814,6 +836,7 @@ class PolymarketClient:
                 result.append({
                     "id":             oid,
                     "market_slug":    slug,
+                    "asset_id":       asset_id,
                     "intent":         self._derive_intent(od, asset_id),
                     "execution_side": execution_side,
                     "price":          float(od.get("price", 0) or 0),
@@ -869,7 +892,7 @@ class PolymarketClient:
             f"Order placed: {intent} {side} {quantity:.1f}x @ ${price:.4f} "
             f"on {market_slug} → id={oid}"
         )
-        return {"id": oid, "raw": result}
+        return {"id": oid, "asset_id": token_id, "raw": result}
 
     async def cancel_order(self, order_id: str, market_slug: str = "") -> bool:
         if self.dry_run:
