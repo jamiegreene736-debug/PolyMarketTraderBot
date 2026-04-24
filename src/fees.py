@@ -51,6 +51,21 @@ def maker_rebate(quantity: float, price: float) -> float:
     return 0.0125 * quantity * price * (1 - price)
 
 
+def maker_rebate_for_rate(quantity: float, price: float, fee_rate_bps: int | float | None) -> float:
+    """
+    Conservative maker rebate estimate using 25% of the token taker fee rate.
+
+    This is informational only; quote displays do not rely on it for guaranteed
+    close proceeds.
+    """
+    try:
+        raw_rate = float(fee_rate_bps or 0)
+    except (TypeError, ValueError):
+        raw_rate = 0.0
+    rebate_rate = (raw_rate / 1000.0) * 0.25
+    return quantity * rebate_rate * price * (1 - price)
+
+
 # ── Strategy-specific helpers ─────────────────────────────────────────────────
 
 def effective_taker_cost_per_share(price: float) -> float:

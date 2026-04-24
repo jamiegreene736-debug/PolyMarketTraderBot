@@ -835,6 +835,16 @@ async def _get_close_quote(
     cost_basis = fillable_qty * float(entry_price or 0.0)
     net_pnl = net_proceeds - cost_basis
     avg_exit_price = gross_proceeds / fillable_qty if fillable_qty > 0 else 0.0
+    full_cost_basis = float(quantity or 0.0) * float(entry_price or 0.0)
+    resting_price = 0.01
+    resting_gross = float(quantity or 0.0) * resting_price
+    # A resting 1c sell is not executable immediately. We show an "if filled"
+    # estimate separately so users can decide whether it is worth posting.
+    resting_rebate = fees.maker_rebate_for_rate(
+        float(quantity or 0.0),
+        resting_price,
+        fee_rate_bps,
+    )
 
     return {
         "best_bid": best_bid,
@@ -849,6 +859,15 @@ async def _get_close_quote(
         "net_pnl": net_pnl,
         "has_liquidity": fillable_qty > 0,
         "fully_fillable": fillable_qty >= float(quantity or 0.0) - 1e-9,
+        "resting_exit": {
+            "price": resting_price,
+            "quantity": float(quantity or 0.0),
+            "gross_proceeds_if_filled": resting_gross,
+            "maker_rebate_estimate": resting_rebate,
+            "net_proceeds_if_filled": resting_gross,
+            "net_pnl_if_filled": resting_gross - full_cost_basis,
+            "net_pnl_after_rebate_estimate": resting_gross + resting_rebate - full_cost_basis,
+        },
     }
 
 
@@ -1414,6 +1433,15 @@ async def api_positions(_=Depends(verify_password)):
                 "net_proceeds": round(_safe_float(close_quote.get("net_proceeds")), 4),
                 "net_pnl": round(_safe_float(close_quote.get("net_pnl")), 4),
                 "fee_rate_bps": round(_safe_float(close_quote.get("fee_rate_bps")), 4),
+                "resting_exit": {
+                    "price": round(_safe_float((close_quote.get("resting_exit") or {}).get("price")), 4),
+                    "quantity": round(_safe_float((close_quote.get("resting_exit") or {}).get("quantity")), 2),
+                    "gross_proceeds_if_filled": round(_safe_float((close_quote.get("resting_exit") or {}).get("gross_proceeds_if_filled")), 4),
+                    "maker_rebate_estimate": round(_safe_float((close_quote.get("resting_exit") or {}).get("maker_rebate_estimate")), 5),
+                    "net_proceeds_if_filled": round(_safe_float((close_quote.get("resting_exit") or {}).get("net_proceeds_if_filled")), 4),
+                    "net_pnl_if_filled": round(_safe_float((close_quote.get("resting_exit") or {}).get("net_pnl_if_filled")), 4),
+                    "net_pnl_after_rebate_estimate": round(_safe_float((close_quote.get("resting_exit") or {}).get("net_pnl_after_rebate_estimate")), 4),
+                },
             },
             "override_active": override_active,
             "pending_exit_order_id": pending_exit_order_id,
@@ -1621,7 +1649,7 @@ async def api_circuit_breaker_reset(_=Depends(verify_password)):
 
 @app.post("/api/close-live-position")
 async def api_close_live_position(payload: dict, _=Depends(verify_password)):
-    """Try to immediately sell a live position using a fill-and-kill exit."""
+    """Sell a live position immediately if possible, otherwise optionally post a resting 1c exit."""
     if _order_manager is None or _client_ref is None:
         raise HTTPException(status_code=503, detail="Bot not running")
 
@@ -1636,24 +1664,28 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
             detail="market_slug, outcome, and quantity are required",
         )
 
+    force_resting = bool(payload.get("force_resting"))
+
     quote = await _get_close_quote(
         market_slug,
         outcome,
         quantity,
         _safe_float(payload.get("entry_price")),
     )
-    if not quote.get("has_liquidity"):
+    if not quote.get("has_liquidity") and not force_resting:
         detail = (
-            "No matching exit liquidity at the current/minimum tick. "
-            "The position remains open until a buyer appears or the market resolves."
+            "No executable buyer is available right now. You can post a resting "
+            "1c exit order, but it will only close if another trader buys it."
         )
         logger.info(f"Manual close no-fill for {market_slug}: no executable bid")
         raise HTTPException(status_code=409, detail=detail)
 
     intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
-    # Close Now is intentionally aggressive: sell into any currently executable
-    # bid at or above Polymarket's minimum tick.
+    # Executable closes use FAK. No-bid exits can only be posted as resting
+    # orders and will remain open until another trader crosses them.
     exit_price = 0.01
+    tif = "TIME_IN_FORCE_GOOD_TILL_CANCEL" if force_resting and not quote.get("has_liquidity") else "TIME_IN_FORCE_FILL_AND_KILL"
+    strategy = "manual_resting_exit" if tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL" else "manual_exit"
 
     pending_exit = _order_manager.get_pending_exit_order(market_slug, intent)
     if pending_exit:
@@ -1667,20 +1699,34 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
         intent=intent,
         price=exit_price,
         quantity=quantity,
-        strategy="manual_exit",
+        strategy=strategy,
         execution_side=SELL,
-        tif="TIME_IN_FORCE_FILL_AND_KILL",
+        tif=tif,
     )
 
     if oid:
         _account_cache["positions_ts"] = 0.0
-        msg = (
-            f"Manual close submitted for {market_slug}: "
-            f"{quantity:.1f}x {outcome} @ ${exit_price:.4f}"
-        )
+        if tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL":
+            resting = quote.get("resting_exit") or {}
+            msg = (
+                f"Manual resting exit posted for {market_slug}: "
+                f"{quantity:.1f}x {outcome} @ ${exit_price:.4f}; "
+                f"if filled pnl=${_safe_float(resting.get('net_pnl_if_filled')):.2f}"
+            )
+        else:
+            msg = (
+                f"Manual close submitted for {market_slug}: "
+                f"{quantity:.1f}x {outcome} @ ${exit_price:.4f}"
+            )
         logger.info(msg)
         await db.log_to_db("INFO", msg)
-        return {"ok": True, "order_id": oid, "price": exit_price}
+        return {
+            "ok": True,
+            "order_id": oid,
+            "price": exit_price,
+            "resting": tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+            "quote": quote,
+        }
 
     if getattr(_order_manager, "last_order_status", "") == "no_match":
         detail = (

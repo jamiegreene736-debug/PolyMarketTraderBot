@@ -363,6 +363,27 @@ async def test_order_manager():
         oid4 = await om2.place_order("m", "q", "ORDER_INTENT_BUY_LONG", 0.5, 10, "test")
         check("order rejected when max_concurrent reached", oid4 is None)
 
+        # Entry-side guard: do not buy tokens with no same-token exit bid.
+        no_exit_client = MagicMock()
+        no_exit_client.place_order = AsyncMock(return_value={"id": "should-not-place"})
+        no_exit_client.get_outcome_order_book = AsyncMock(return_value={"bids": []})
+        om_no_exit = OrderManager(no_exit_client, max_concurrent=5)
+        oid_no_exit = await om_no_exit.place_order(
+            market_slug="illiquid-market",
+            question="Illiquid market?",
+            intent="ORDER_INTENT_BUY_LONG",
+            price=0.01,
+            quantity=500.0,
+            strategy="market_making",
+        )
+        check("entry guard rejects tokens with no exit bid", oid_no_exit is None)
+        check("entry guard status is no_exit_liquidity",
+              om_no_exit.last_order_status == "no_exit_liquidity",
+              f"status={om_no_exit.last_order_status!r}")
+        check("entry guard does not call place_order",
+              no_exit_client.place_order.await_count == 0,
+              f"calls={no_exit_client.place_order.await_count}")
+
         # Cancel order
         success = await om.cancel_order("order-abc-123")
         check("cancel_order returns True", success is True)
@@ -439,6 +460,9 @@ def test_fee_rate_quote_math():
     fee = fees.taker_fee_for_rate(100, 0.50, 30)
     check("fee-rate quote math: 30 base fee at 50c on 100 shares = $0.75",
           abs(fee - 0.75) < 0.00001, f"fee={fee}")
+    rebate = fees.maker_rebate_for_rate(100, 0.50, 30)
+    check("maker rebate estimate uses 25% of taker rate",
+          abs(rebate - 0.1875) < 0.00001, f"rebate={rebate}")
 
 test_fee_rate_quote_math()
 

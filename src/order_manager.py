@@ -77,6 +77,15 @@ class OrderManager:
                 await db.log_to_db("INFO", msg)
                 return None
 
+            has_exit_liquidity = await self._has_same_token_exit_liquidity(
+                market_slug=market_slug,
+                intent=intent,
+                quantity=quantity,
+            )
+            if not has_exit_liquidity:
+                self.last_order_status = "no_exit_liquidity"
+                return None
+
         # Liquidity gate: skip thin markets where we can't get in/out without
         # moving price against ourselves. Uses the market's `liquidity` field
         # as a proxy for total book depth.
@@ -408,6 +417,63 @@ class OrderManager:
         self._market_orders.clear()
 
     # ── Helpers ──────────────────────────────────────────────────────────────
+
+    async def _has_same_token_exit_liquidity(
+        self,
+        market_slug: str,
+        intent: str,
+        quantity: float,
+    ) -> bool:
+        """
+        Guard new entries against one-way traps.
+
+        Before buying YES/NO tokens, verify there is some bid depth on that
+        same token. If there is no buyer for the token now, a future exit can
+        only be a resting order that may never fill.
+        """
+        outcome = "NO" if intent == "ORDER_INTENT_BUY_SHORT" else "YES"
+        fetch_book = getattr(self.client, "get_outcome_order_book", None)
+        if not callable(fetch_book):
+            return True
+
+        try:
+            book = await fetch_book(market_slug, outcome)
+        except TypeError:
+            # Unit-test mocks and non-CLOB adapters may not implement this async helper.
+            return True
+        except Exception as e:
+            logger.debug(f"[order] Exit-liquidity check skipped for {market_slug}: {e}")
+            return True
+
+        bids = book.get("bids") or []
+        executable_bid_depth = 0.0
+        best_bid = 0.0
+        for level in bids:
+            try:
+                price = float(level.get("price") or 0.0)
+                size = float(level.get("size") or 0.0)
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if price < 0.01 or size <= 0:
+                continue
+            best_bid = max(best_bid, price)
+            executable_bid_depth += size
+
+        required_depth = max(
+            MIN_ORDER_SHARES,
+            min(float(quantity or 0.0), float(quantity or 0.0) * 0.25),
+        )
+        if executable_bid_depth >= required_depth:
+            return True
+
+        msg = (
+            f"[order] SKIP {intent} on {market_slug}: no same-token exit depth "
+            f"for {outcome} (bid_depth={executable_bid_depth:.1f} shares, "
+            f"best_bid=${best_bid:.4f}, required~{required_depth:.1f})."
+        )
+        logger.info(msg)
+        await db.log_to_db("INFO", msg)
+        return False
 
     def _is_duplicate(self, market_slug: str, intent: str, price: float,
                       strategy: str) -> bool:

@@ -816,10 +816,13 @@
         const strategy  = (p.strategy || '—').replace(/_/g, ' ');
         const quote = p.close_quote || {};
         const hasCloseLiquidity = !!quote.has_liquidity;
+        const resting = quote.resting_exit || {};
+        const restingPnl = Number(resting.net_pnl_if_filled || 0);
+        const restingPrice = Number(resting.price || 0.01);
         const estPnl = p.estimated_pnl === null || p.estimated_pnl === undefined ? null : Number(p.estimated_pnl);
         const quoteDetail = hasCloseLiquidity
           ? `<div style="color:#64748b; font-size:11px; margin-top:2px;" title="Gross proceeds minus estimated exit taker fee. Entry fees, if any, may already be sunk and are not always exposed by Polymarket position data.">close ${Number(quote.fillable_qty || 0).toFixed(1)}x @ avg $${Number(quote.avg_exit_price || 0).toFixed(4)} · fee $${Number(quote.exit_fee || 0).toFixed(5)}</div>${quote.fully_fillable ? '' : `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">partial only; ${Number(quote.unfilled_qty || 0).toFixed(1)}x no bid</div>`}`
-          : '<div style="color:#f59e0b; font-size:11px; margin-top:2px;">no executable bid</div>';
+          : `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">no executable bid</div><div class="${restingPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}" style="font-size:11px; margin-top:2px;">if 1c exit fills: ${restingPnl >= 0 ? '+' : ''}$${restingPnl.toFixed(2)}</div>`;
         const estPnlHtml = estPnl === null
           ? `<span style="color:#f59e0b; font-weight:700;">No bid</span>${quoteDetail}`
           : `<span class="${estPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${estPnl >= 0 ? '+' : ''}$${estPnl.toFixed(2)}</span>${quoteDetail}`;
@@ -833,10 +836,12 @@
 	          outcome: label,
 	          entry_price: Number(p.price || 0),
 	          quantity: Number(p.quantity || 0),
+	          pending_exit_order_id: pendingExit || '',
 	          quote,
 	        }));
+	        const closeLabel = hasCloseLiquidity ? 'Close Now' : `Post 1c Exit${restingPnl < 0 ? ` (${restingPnl >= 0 ? '+' : ''}$${restingPnl.toFixed(2)} if filled)` : ''}`;
 	        const closeButton = p.market_slug && p.market_slug !== '—'
-	          ? `<button class="btn-close-now" data-position="${closePayload}" onclick="closeLivePositionFromButton(this)">Close Now</button>`
+	          ? `<button class="btn-close-now" data-position="${closePayload}" title="${hasCloseLiquidity ? 'Sell into current executable bids now' : `No buyer is available. Post a resting sell at $${restingPrice.toFixed(4)}; it closes only if filled.`}" onclick="closeLivePositionFromButton(this)">${closeLabel}</button>`
 	          : '';
 	        const pendingStatus = pendingExit
 	          ? `<span style="color:#f59e0b; font-weight:700;" title="A sell order is resting on Polymarket and will close only if it fills.">Exit pending</span>`
@@ -908,13 +913,20 @@
 	    }
 	    const market = payload.title || payload.market_slug || 'this position';
 	    const quote = payload.quote || {};
+	    const resting = quote.resting_exit || {};
+	    const restingPnl = Number(resting.net_pnl_if_filled || 0);
+	    const restingPrice = Number(resting.price || 0.01);
 	    const quoteLine = quote.has_liquidity
 	      ? `\n\nCurrent executable quote: ${Number(quote.fillable_qty || 0).toFixed(1)} shares @ avg $${Number(quote.avg_exit_price || 0).toFixed(4)}, est. net P&L ${Number(quote.net_pnl || 0) >= 0 ? '+' : ''}$${Number(quote.net_pnl || 0).toFixed(2)} after est. exit fee $${Number(quote.exit_fee || 0).toFixed(5)}.${quote.fully_fillable ? '' : `\nOnly a partial close is currently quoted; ${Number(quote.unfilled_qty || 0).toFixed(1)} shares have no executable bid.`}`
-	      : '\n\nCurrent executable quote: no bid. This will likely not fill.';
-	    if (!confirm(`Try to close ${market}? This submits an immediate sell. It can still fail if Polymarket liquidity changes before the order arrives.${quoteLine}`)) return;
+	      : `\n\nCurrent executable quote: no bid. This cannot close immediately.\n\nThis will post a resting sell at $${restingPrice.toFixed(4)} and wait for a buyer. If the full order fills, estimated P&L is ${restingPnl >= 0 ? '+' : ''}$${restingPnl.toFixed(2)} before any possible maker rebate.`;
+	    const actionText = quote.has_liquidity
+	      ? 'This submits an immediate sell. It can still fail if Polymarket liquidity changes before the order arrives.'
+	      : 'This does not guarantee a close. It only places a visible exit order that can fill if another trader buys it.';
+	    if (!confirm(`Try to close ${market}? ${actionText}${quoteLine}`)) return;
+	    if (!quote.has_liquidity) payload.force_resting = true;
 	    btn.disabled = true;
 	    const original = btn.textContent;
-	    btn.textContent = 'Closing...';
+	    btn.textContent = quote.has_liquidity ? 'Closing...' : 'Posting...';
 	    try {
 	      const res = await fetch('/api/close-live-position', {
 	        method: 'POST',
@@ -922,7 +934,8 @@
 	        body: JSON.stringify(payload),
 	      });
 	      if (res.ok) {
-	        showToast('Manual close submitted. Refreshing position...', 'success');
+	        const data = await res.json();
+	        showToast(data.resting ? '1c exit posted. It will close only if it fills.' : 'Manual close submitted. Refreshing position...', 'success');
 	        setTimeout(refreshPositions, 1500);
 	        return;
 	      }
