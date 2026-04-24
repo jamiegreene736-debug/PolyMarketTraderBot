@@ -34,6 +34,7 @@ async def init_db():
                 resolved_at TEXT
             )
         """)
+        await _ensure_column(db, "trades", "execution_side", "TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS balance_snapshots (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,13 +134,17 @@ async def update_heartbeat(error: str = None):
 
 
 async def insert_trade(strategy: str, market_slug: str, question: str,
-                       side: str, price: float, quantity: float, order_id: str):
+                       side: str, price: float, quantity: float, order_id: str,
+                       execution_side: str | None = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
-            INSERT INTO trades (timestamp, strategy, market_slug, question, side, price, quantity, order_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trades (
+                timestamp, strategy, market_slug, question, side, execution_side,
+                price, quantity, order_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (datetime.utcnow().isoformat(), strategy, market_slug, question,
-              side, price, quantity, order_id))
+              side, execution_side, price, quantity, order_id))
         await db.commit()
 
 
@@ -328,7 +333,7 @@ async def get_open_trades_metadata() -> dict[str, dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT order_id, strategy, question, market_slug, side, price, quantity, timestamp "
+            "SELECT order_id, strategy, question, market_slug, side, execution_side, price, quantity, timestamp "
             "FROM trades WHERE status = 'open' AND order_id IS NOT NULL"
         ) as cur:
             rows = await cur.fetchall()
@@ -344,7 +349,7 @@ async def get_open_trade_rows() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT order_id, strategy, question, market_slug, side, price, quantity, timestamp "
+            "SELECT order_id, strategy, question, market_slug, side, execution_side, price, quantity, timestamp "
             "FROM trades WHERE status = 'open' ORDER BY timestamp ASC"
         ) as cur:
             rows = await cur.fetchall()

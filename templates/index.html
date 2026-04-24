@@ -792,7 +792,13 @@
         const strategy  = (p.strategy || '—').replace(/_/g, ' ');
         const estPnl = Number(p.estimated_pnl || 0);
         const estPnlHtml = `<span class="${estPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${estPnl >= 0 ? '+' : ''}$${estPnl.toFixed(2)}</span>`;
-        const actionCell = p.condition_id
+        const pendingExit = p.pending_exit_order_id;
+        const pendingExitDetail = pendingExit
+          ? `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">${Number(p.pending_exit_quantity || 0).toFixed(1)}x @ $${Number(p.pending_exit_price || 0).toFixed(4)}</div>`
+          : '';
+        const actionCell = pendingExit
+          ? `<span style="color:#f59e0b; font-weight:700;">Exit pending</span>`
+          : p.condition_id
           ? `<button class="btn-override ${p.override_active ? 'active' : ''}" onclick="toggleAutoCloseOverride('${p.condition_id}', '${p.outcome}', ${p.override_active ? 'false' : 'true'}, this)">${p.override_active ? 'Resume Auto' : 'Override Auto'}</button>`
           : '<span style="color:#475569;">Unavailable</span>';
         return `
@@ -809,6 +815,7 @@
               data-max-hold-label="${p.max_hold_label || ''}"
             >
               ${p.force_exit_in_label || '—'}
+              ${pendingExitDetail}
               ${p.max_hold_label && p.max_hold_label !== '—' ? `<div style="color:#64748b; font-size:11px; margin-top:2px;">max ${p.max_hold_label}</div>` : ''}
             </td>
             <td>${estPnlHtml}</td>

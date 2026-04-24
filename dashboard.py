@@ -847,7 +847,7 @@ async def _reconcile_live_capital_allocations(
             continue
 
         execution_side = str(
-            o.get("side") or meta.get("execution_side") or ""
+            o.get("execution_side") or meta.get("execution_side") or ""
         ).upper().strip()
         if execution_side == "SELL":
             continue
@@ -1114,7 +1114,24 @@ async def api_positions(_=Depends(verify_password)):
         }
 
     local_by_market_side: dict[tuple[str, str], list[dict]] = {}
+    pending_exit_by_market_side: dict[tuple[str, str], dict] = {}
+    if _order_manager is not None:
+        for order in _order_manager.get_open_positions():
+            if str(order.get("execution_side") or "").upper() != "SELL":
+                continue
+            side_key = str(order.get("intent") or order.get("side") or "")
+            if not side_key:
+                continue
+            for market_ref in (order.get("market_slug"), order.get("question")):
+                market_key = _normalize_market_key(market_ref)
+                if market_key:
+                    pending_exit_by_market_side.setdefault((market_key, side_key), order)
+
     for ref in local_position_refs:
+        if str(ref.get("execution_side") or "").upper() == "SELL":
+            continue
+        if str(ref.get("strategy") or "") == "position_monitor":
+            continue
         side_key = str(ref.get("intent") or ref.get("side") or "")
         if not side_key:
             continue
@@ -1179,6 +1196,13 @@ async def api_positions(_=Depends(verify_password)):
                 candidates = local_by_market_side.get((title_key, intent), [])
                 if candidates:
                     local_match = candidates.pop(0)
+        pending_exit = None
+        for market_ref in (p.get("slug"), p.get("title")):
+            market_key = _normalize_market_key(market_ref)
+            if market_key:
+                pending_exit = pending_exit_by_market_side.get((market_key, intent))
+                if pending_exit:
+                    break
         avg_price = float(p.get("avgPrice") or 0.0)
         size = float(p.get("size") or 0.0)
         current_value = float(p.get("currentValue") or (avg_price * size) or 0.0)
@@ -1223,6 +1247,9 @@ async def api_positions(_=Depends(verify_password)):
             else (round(1.0 - current_ask, 4) - avg_price) * size
         )
         override_active = (condition_id, outcome) in override_keys
+        pending_exit_order_id = (pending_exit or {}).get("order_id") or ""
+        pending_exit_price = _safe_float((pending_exit or {}).get("price"))
+        pending_exit_quantity = _safe_float((pending_exit or {}).get("quantity"))
         positions.append({
             "order_id": "",
             "market_slug": market_slug,
@@ -1237,6 +1264,9 @@ async def api_positions(_=Depends(verify_password)):
             "closable": False,
             "estimated_pnl": round(estimated_pnl, 2),
             "override_active": override_active,
+            "pending_exit_order_id": pending_exit_order_id,
+            "pending_exit_price": pending_exit_price,
+            "pending_exit_quantity": pending_exit_quantity,
             "age_label": _format_age_label(age_seconds),
             "max_hold_label": _format_age_label(max_hold_seconds),
             "placed_at_ts": placed_at or 0,
@@ -1244,6 +1274,9 @@ async def api_positions(_=Depends(verify_password)):
             "force_exit_in_label": (
                 "manual hold"
                 if override_active
+                else
+                "exit pending"
+                if pending_exit_order_id
                 else
                 "expired"
                 if force_exit_in is not None and force_exit_in <= 0

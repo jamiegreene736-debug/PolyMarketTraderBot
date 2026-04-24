@@ -808,12 +808,16 @@ class PolymarketClient:
                 if not oid:
                     continue
                 quantity = self._remaining_order_size(od)
+                execution_side = str(
+                    od.get("side") or od.get("orderSide") or od.get("order_side") or ""
+                ).upper()
                 result.append({
-                    "id":          oid,
-                    "market_slug": slug,
-                    "intent":      self._derive_intent(od, asset_id),
-                    "price":       float(od.get("price", 0) or 0),
-                    "quantity":    quantity,
+                    "id":             oid,
+                    "market_slug":    slug,
+                    "intent":         self._derive_intent(od, asset_id),
+                    "execution_side": execution_side,
+                    "price":          float(od.get("price", 0) or 0),
+                    "quantity":       quantity,
                 })
             return result
         except Exception as e:

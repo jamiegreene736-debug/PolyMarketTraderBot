@@ -84,6 +84,10 @@ class PositionMonitorStrategy(BaseStrategy):
 
         local_by_market_side: dict[tuple[str, str], list[dict]] = {}
         for ref in local_refs:
+            if str(ref.get("execution_side") or "").upper() == "SELL":
+                continue
+            if str(ref.get("strategy") or "") == "position_monitor":
+                continue
             side_key = str(ref.get("intent") or ref.get("side") or "")
             if not side_key:
                 continue
@@ -317,6 +321,18 @@ class PositionMonitorStrategy(BaseStrategy):
                 f"age={age_hours:.1f}h est_pnl=${pnl_est:.2f}"
             )
 
+            pending_exit = self.order_manager.get_pending_exit_order(slug, exit_intent)
+            if pending_exit:
+                pending_qty = float(pending_exit.get("quantity") or 0.0)
+                pending_price = float(pending_exit.get("price") or 0.0)
+                pending_id = str(pending_exit.get("order_id") or "")[:12]
+                self.log(
+                    f"Exit already pending for {slug} ({trigger}) — "
+                    f"{pending_qty:.1f}x @ ${pending_price:.4f} id={pending_id}; "
+                    "not placing a duplicate sell order"
+                )
+                continue
+
             # Release the capital that was locked when the entry was placed.
             # For live account positions we no longer rely on an open entry order
             # existing in memory, so we place the exit directly and then retire
@@ -346,4 +362,4 @@ class PositionMonitorStrategy(BaseStrategy):
                 self.log(f"Exit order failed for {slug} — position stays open", level="warning")
 
         if exits:
-            self.log(f"Closed {exits} position(s) this tick")
+            self.log(f"Posted {exits} exit order(s) this tick")

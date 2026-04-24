@@ -38,7 +38,8 @@ class OrderManager:
                           price: float, quantity: float, strategy: str,
                           execution_side: str = BUY,
                           tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL") -> str | None:
-        is_buy_order = str(execution_side or BUY).upper() != "SELL"
+        execution_side = str(execution_side or BUY).upper()
+        is_buy_order = execution_side != "SELL"
 
         async with self._lock:
             if is_buy_order and len(self._open_orders) >= self.max_concurrent:
@@ -133,6 +134,7 @@ class OrderManager:
                 market_slug=market_slug,
                 question=question,
                 side=intent,
+                execution_side=execution_side,
                 price=price,
                 quantity=quantity,
                 order_id=order_id,
@@ -247,13 +249,24 @@ class OrderManager:
                 if not order_id:
                     continue
 
-                # Normalise market slug
-                slug = (o.get("marketSlug") or o.get("market_slug") or
-                        o.get("slug") or o.get("conditionId") or "")
+                meta = db_meta.get(order_id, {})
 
-                # Normalise intent / side
-                intent = (o.get("intent") or o.get("side") or
-                          o.get("orderType") or "ORDER_INTENT_BUY_LONG")
+                # Normalise market slug
+                raw_slug = (o.get("marketSlug") or o.get("market_slug") or
+                            o.get("slug") or o.get("conditionId") or "")
+                slug = meta.get("market_slug") or raw_slug
+
+                # Intent is the outcome token direction (YES/NO). Execution
+                # side is whether this open order is buying or selling that
+                # token. Keeping them separate prevents resting exits from
+                # being treated as new entries after a restart.
+                intent = (
+                    meta.get("side") or o.get("intent") or o.get("orderType")
+                    or "ORDER_INTENT_BUY_LONG"
+                )
+                execution_side = str(
+                    o.get("execution_side") or meta.get("execution_side") or BUY
+                ).upper()
 
                 # Normalise price — can be float, str, or nested {"value": "0.97"}
                 raw_price = o.get("price", 0)
@@ -268,7 +281,6 @@ class OrderManager:
                 quantity = self._remaining_order_size(o)
 
                 # Back-fill from DB if we have a record
-                meta = db_meta.get(order_id, {})
                 strategy = meta.get("strategy", "synced")
                 question  = meta.get("question", slug)
 
@@ -292,6 +304,7 @@ class OrderManager:
                     "order_id": order_id,
                     "market_slug": slug,
                     "intent": intent,
+                    "execution_side": execution_side,
                     "price": price,
                     "quantity": quantity,
                     "strategy": strategy,
@@ -316,6 +329,20 @@ class OrderManager:
             for order in self._open_orders.values()
             if order.get("strategy") not in exclude
         ]
+
+    def get_pending_exit_order(self, market_slug: str, intent: str) -> dict | None:
+        """Return an existing open SELL order for the same market/outcome, if any."""
+        target_slug = str(market_slug or "").strip()
+        target_intent = str(intent or "").strip()
+        for order in self._open_orders.values():
+            if str(order.get("execution_side") or "BUY").upper() != "SELL":
+                continue
+            if str(order.get("market_slug") or "").strip() != target_slug:
+                continue
+            if str(order.get("intent") or "").strip() != target_intent:
+                continue
+            return dict(order)
+        return None
 
     def get_market_order_count(self, market_slug: str) -> int:
         return len(self._market_orders.get(market_slug, []))
