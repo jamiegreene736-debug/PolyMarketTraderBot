@@ -6,8 +6,8 @@ Hard stops that pause or kill the bot when losses exceed configured thresholds.
 Four independent triggers — any one fires and ALL trading stops:
 
   1. Daily loss limit      — total realized losses today exceed max_daily_loss_usdc
-  2. Portfolio drawdown    — current balance is more than max_drawdown_pct below the
-                             session-start balance (catches unrealized losses too)
+  2. Portfolio drawdown    — account equity is more than max_drawdown_pct below the
+                             session-start equity (cash + live position value)
   3. Consecutive losses    — N straight losing trades without a winner
   4. Recent realized loss  — small-account loss cluster exceeds a dollar threshold
   5. Rapid order rate      — more than max_orders_per_minute placed in any 60s window
@@ -52,6 +52,9 @@ class CircuitBreaker:
         """
         Returns True if it's safe to trade, False if the breaker has tripped.
         Call this at the top of every tick before running strategies.
+
+        current_balance is account equity for drawdown checks. It should include
+        cash plus live position value, not cash alone.
         """
         if self._tripped:
             return False

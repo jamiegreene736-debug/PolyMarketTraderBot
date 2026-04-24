@@ -227,7 +227,15 @@ async def run_bot_loop():
     # Expose to API routes
     _order_manager = order_manager
     _capital = capital
-    _circuit_breaker = CircuitBreaker(config, start_balance=capital.total_usdc)
+    startup_equity = await _get_account_equity(client, capital.total_usdc)
+    if abs(startup_equity - capital.total_usdc) >= 0.01:
+        msg = (
+            f"Startup account equity: ${startup_equity:.2f} "
+            f"(cash=${capital.total_usdc:.2f})"
+        )
+        logger.info(msg)
+        await db.log_to_db("INFO", msg)
+    _circuit_breaker = CircuitBreaker(config, start_balance=startup_equity)
     _ai_observer = AIObserver(config.get("ai_observer", {}))
     cleared_reports = await db.clear_ai_observer_reports()
     msg = f"AI observer session reset ({cleared_reports} stale report(s) cleared)"
@@ -367,16 +375,23 @@ async def run_bot_loop():
                     ]
                 except Exception:
                     recent_pnls = []
-                cb_safe = await _circuit_breaker.check(capital.total_usdc, recent_pnls)
+                account_equity = await _get_account_equity(client, capital.total_usdc)
+                cb_safe = await _circuit_breaker.check(account_equity, recent_pnls)
                 if not cb_safe:
                     _bot_state["status"] = "error"
                     _bot_state["last_error"] = f"Circuit breaker: {_circuit_breaker.trip_reason}"
-                    await client.cancel_all_orders()
+                    msg = (
+                        "Circuit breaker halted new strategy execution; existing exchange "
+                        "orders were left untouched for manual review."
+                    )
+                    logger.warning(msg)
+                    await db.log_to_db("WARNING", msg)
                     break
 
                 tick_msg = (
                     f"Tick #{balance_refresh_counter} | "
                     f"balance=${capital.total_usdc:.2f} | "
+                    f"equity=${account_equity:.2f} | "
                     f"open_orders={order_manager.get_total_open_orders()} | "
                     f"strategies={[s.name for s in enabled]}"
                 )
@@ -457,9 +472,10 @@ async def run_bot_loop():
     except asyncio.CancelledError:
         pass
     finally:
-        await client.cancel_all_orders()
-        await client.close()
-        logger.info("Bot stopped cleanly.")
+        # Do not cancel exchange orders on shutdown/error. Pending exits are
+        # safety orders and must be left resting unless the user explicitly
+        # asks to cancel them.
+        logger.info("Bot loop stopped; exchange orders left untouched.")
     # Do NOT set status here — supervisor owns the status after a crash.
     # Only /api/stop sets status="stopped" (user-requested).
 
@@ -602,6 +618,35 @@ def _format_age_label(seconds: float | None) -> str:
     if minutes == 0:
         return f"{hours}h"
     return f"{hours}h {minutes}m"
+
+
+async def _get_account_equity(client: PolymarketClient, cash_balance: float) -> float:
+    """
+    Include live position value for drawdown checks. Cash can drop when an
+    order fills or collateral moves into a position, which is not a loss.
+    """
+    user_address = (client.funder_address or client.signer_address or "").strip()
+    positions: list[dict] = []
+    if user_address:
+        try:
+            positions = await asyncio.wait_for(
+                client.get_positions(user=user_address),
+                timeout=5.0,
+            )
+            if positions:
+                _account_cache["positions"] = positions
+                _account_cache["positions_ts"] = asyncio.get_event_loop().time()
+        except Exception as e:
+            logger.warning(f"Account equity position refresh failed, using cached positions: {e}")
+            positions = list(_account_cache.get("positions") or [])
+
+    position_value = 0.0
+    for pos in positions:
+        try:
+            position_value += float(pos.get("currentValue") or 0.0)
+        except (TypeError, ValueError):
+            continue
+    return max(0.0, float(cash_balance or 0.0) + position_value)
 
 
 def _position_monitor_hold_hours() -> dict:
@@ -1455,7 +1500,10 @@ async def api_circuit_breaker_reset(_=Depends(verify_password)):
         raise HTTPException(status_code=503, detail="Bot not running")
     if _capital is None:
         raise HTTPException(status_code=503, detail="Bot not running")
-    _circuit_breaker.reset(_capital.total_usdc)
+    reset_value = _capital.total_usdc
+    if _client_ref is not None:
+        reset_value = await _get_account_equity(_client_ref, _capital.total_usdc)
+    _circuit_breaker.reset(reset_value)
     # Also clear the bot error state so it can resume
     if _bot_state["status"] == "error" and "Circuit breaker" in (_bot_state.get("last_error") or ""):
         _bot_state["status"] = "running"
