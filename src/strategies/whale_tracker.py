@@ -352,7 +352,7 @@ class WhaleTrackerStrategy(BaseStrategy):
 
             order_size = fallback_size
             if not self.capital_manager.can_allocate(self.name, order_size):
-                self.log("Capital limit reached", level="warning")
+                self.log("Idle: capital limit reached")
                 break
 
             shares = round(order_size / taker_price, 2)
@@ -464,7 +464,7 @@ class WhaleTrackerStrategy(BaseStrategy):
                 order_size = fallback_size
 
             if not self.capital_manager.can_allocate(self.name, order_size):
-                self.log("Capital limit reached", level="warning")
+                self.log("Idle: capital limit reached")
                 break
 
             shares = round(order_size / taker_price, 2)

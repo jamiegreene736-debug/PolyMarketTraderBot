@@ -63,12 +63,12 @@ class OrderManager:
         available_for_orders = self.get_available_order_capacity_usdc()
         if available_for_orders is not None and notional > available_for_orders:
             msg = (
-                f"[order] SKIP {intent} on {market_slug}: notional ${notional:.2f} "
+                f"[order] WAIT {intent} on {market_slug}: notional ${notional:.2f} "
                 f"exceeds exchange-safe capacity ${available_for_orders:.2f} "
                 f"(tracked active orders=${self.get_open_order_notional_usdc():.2f})."
             )
-            logger.warning(msg)
-            await db.log_to_db("WARNING", msg)
+            logger.info(msg)
+            await db.log_to_db("INFO", msg)
             return None
 
         # Liquidity gate: skip thin markets where we can't get in/out without

@@ -40,11 +40,11 @@ class NearCertaintyStrategy(BaseStrategy):
         if not markets:
             stats = await self.market_data.get_resolution_window_stats(max_hours)
             self.log(
-                f"No candidate markets within {max_hours}h | "
+                f"Idle: no markets resolving within {max_hours}h | "
                 f"active={stats['active_markets']} "
                 f"with_time={stats['with_resolution_time']} "
                 f"missing_time={stats['missing_resolution_time']}",
-                level="warning",
+                level="info",
             )
             return
 
@@ -114,7 +114,7 @@ class NearCertaintyStrategy(BaseStrategy):
                 order_size = fallback_size
 
             if not self.capital_manager.can_allocate(self.name, order_size):
-                self.log("Capital limit reached", level="warning")
+                self.log("Idle: capital limit reached")
                 break
 
             # Price aggressively above the ask to guarantee an immediate taker fill.
@@ -152,5 +152,4 @@ class NearCertaintyStrategy(BaseStrategy):
                 f"Near-certainty inactive this tick | "
                 f"window={len(markets)} price_filtered={price_filtered} "
                 f"profit_filtered={profit_filtered} opportunities={opportunity_count}",
-                level="warning",
             )

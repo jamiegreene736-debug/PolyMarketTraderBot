@@ -23,6 +23,7 @@ class MarketMakingStrategy(BaseStrategy):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._last_refresh: dict[str, float] = {}
+        self._last_capacity_log = 0.0
 
     async def run(self):
         if not self.enabled:
@@ -36,6 +37,20 @@ class MarketMakingStrategy(BaseStrategy):
         max_orders       = self.config.get("max_open_orders_per_market", 4)
         order_size       = self.config.get("order_size_usdc", 100)
         refresh_interval = self.config.get("refresh_interval_seconds", 60)
+        capacity         = self.order_manager.get_available_order_capacity_usdc()
+        open_notional    = self.order_manager.get_open_order_notional_usdc()
+        if (
+            capacity is not None
+            and capacity < order_size
+            and self.order_manager.get_total_open_orders() > 0
+        ):
+            if (now - self._last_capacity_log) >= 300:
+                self.log(
+                    f"Idle: exchange-safe capacity ${capacity:.2f} below order size "
+                    f"${order_size:.2f}; maintaining ${open_notional:.2f} in resting orders"
+                )
+                self._last_capacity_log = now
+            return
 
         markets = await self.market_data.get_markets_by_volume(
             min_volume=min_volume, top_n=num_markets

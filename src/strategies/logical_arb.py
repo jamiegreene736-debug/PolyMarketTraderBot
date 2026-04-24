@@ -100,7 +100,7 @@ class LogicalArbStrategy(BaseStrategy):
             # Check we have enough capital for all legs
             total_needed = order_size * len(slugs)
             if not self.capital_manager.can_allocate(self.name, total_needed):
-                self.log(f"Not enough capital for {len(slugs)}-leg arb (need ${total_needed})", level="warning")
+                self.log(f"Idle: not enough capital for {len(slugs)}-leg arb (need ${total_needed})")
                 continue
 
             # Place all legs simultaneously

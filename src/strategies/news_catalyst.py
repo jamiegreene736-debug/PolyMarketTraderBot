@@ -266,7 +266,7 @@ class NewsCatalystStrategy(BaseStrategy):
         shares = round(order_size / max(taker_price, 0.01), 2)
 
         if not self.capital_manager.can_allocate(self.name, order_size):
-            self.log("Capital limit reached", level="warning")
+            self.log("Idle: capital limit reached")
             return False
         if not self.capital_manager.allocate(self.name, order_size):
             return False
