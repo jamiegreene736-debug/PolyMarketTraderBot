@@ -836,10 +836,12 @@ async def _get_close_quote(
     net_pnl = net_proceeds - cost_basis
     avg_exit_price = gross_proceeds / fillable_qty if fillable_qty > 0 else 0.0
     full_cost_basis = float(quantity or 0.0) * float(entry_price or 0.0)
-    resting_price = 0.01
+    min_resting_price = 0.01
+    break_even_price = float(entry_price or 0.0)
+    resting_price = max(min_resting_price, min(0.99, break_even_price))
     resting_gross = float(quantity or 0.0) * resting_price
-    # A resting 1c sell is not executable immediately. We show an "if filled"
-    # estimate separately so users can decide whether it is worth posting.
+    # A resting break-even sell is not executable immediately. We show an
+    # "if filled" estimate separately so users do not confuse it with live P&L.
     resting_rebate = fees.maker_rebate_for_rate(
         float(quantity or 0.0),
         resting_price,
@@ -861,6 +863,9 @@ async def _get_close_quote(
         "fully_fillable": fillable_qty >= float(quantity or 0.0) - 1e-9,
         "resting_exit": {
             "price": resting_price,
+            "min_price": min_resting_price,
+            "break_even_price": break_even_price,
+            "target": "break_even",
             "quantity": float(quantity or 0.0),
             "gross_proceeds_if_filled": resting_gross,
             "maker_rebate_estimate": resting_rebate,
@@ -1435,6 +1440,9 @@ async def api_positions(_=Depends(verify_password)):
                 "fee_rate_bps": round(_safe_float(close_quote.get("fee_rate_bps")), 4),
                 "resting_exit": {
                     "price": round(_safe_float((close_quote.get("resting_exit") or {}).get("price")), 4),
+                    "min_price": round(_safe_float((close_quote.get("resting_exit") or {}).get("min_price")), 4),
+                    "break_even_price": round(_safe_float((close_quote.get("resting_exit") or {}).get("break_even_price")), 4),
+                    "target": str((close_quote.get("resting_exit") or {}).get("target") or "break_even"),
                     "quantity": round(_safe_float((close_quote.get("resting_exit") or {}).get("quantity")), 2),
                     "gross_proceeds_if_filled": round(_safe_float((close_quote.get("resting_exit") or {}).get("gross_proceeds_if_filled")), 4),
                     "maker_rebate_estimate": round(_safe_float((close_quote.get("resting_exit") or {}).get("maker_rebate_estimate")), 5),
@@ -1675,7 +1683,7 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
     if not quote.get("has_liquidity") and not force_resting:
         detail = (
             "No executable buyer is available right now. You can post a resting "
-            "1c exit order, but it will only close if another trader buys it."
+            "break-even exit order, but it will only close if another trader buys it."
         )
         logger.info(f"Manual close no-fill for {market_slug}: no executable bid")
         raise HTTPException(status_code=409, detail=detail)
@@ -1683,7 +1691,10 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
     intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
     # Executable closes use FAK. No-bid exits can only be posted as resting
     # orders and will remain open until another trader crosses them.
+    resting = quote.get("resting_exit") or {}
     exit_price = 0.01
+    if force_resting and not quote.get("has_liquidity"):
+        exit_price = _safe_float(resting.get("price")) or 0.01
     tif = "TIME_IN_FORCE_GOOD_TILL_CANCEL" if force_resting and not quote.get("has_liquidity") else "TIME_IN_FORCE_FILL_AND_KILL"
     strategy = "manual_resting_exit" if tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL" else "manual_exit"
 
@@ -1709,7 +1720,7 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
         if tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL":
             resting = quote.get("resting_exit") or {}
             msg = (
-                f"Manual resting exit posted for {market_slug}: "
+                f"Manual break-even exit posted for {market_slug}: "
                 f"{quantity:.1f}x {outcome} @ ${exit_price:.4f}; "
                 f"if filled pnl=${_safe_float(resting.get('net_pnl_if_filled')):.2f}"
             )
