@@ -388,6 +388,41 @@ async def test_order_manager():
 asyncio.run(test_order_manager())
 
 
+async def test_open_order_token_hydration():
+    from src.client import PolymarketClient
+
+    client = PolymarketClient("", "", "", "", dry_run=True)
+    client._client = MagicMock()
+    client._client.get_orders = MagicMock(return_value=[{
+        "id": "exit-order-1",
+        "asset_id": "YES_TOKEN",
+        "side": "SELL",
+        "price": "0.01",
+        "size": "1500",
+    }])
+
+    async def fake_get_markets():
+        client._slug_tokens["will-test-market"] = {
+            "condition_id": "condition-1",
+            "yes_token_id": "YES_TOKEN",
+            "no_token_id": "NO_TOKEN",
+        }
+        return []
+
+    client.get_markets = fake_get_markets
+    try:
+        orders = await client.get_open_orders()
+        check("open-order sync hydrates token mapping before classification",
+              len(orders) == 1 and orders[0]["market_slug"] == "will-test-market")
+        check("restored SELL YES order keeps BUY_LONG intent",
+              orders[0]["execution_side"] == "SELL"
+              and orders[0]["intent"] == "ORDER_INTENT_BUY_LONG")
+    finally:
+        await client.close()
+
+asyncio.run(test_open_order_token_hydration())
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Tier 6 — Strategy Initialization
 # ══════════════════════════════════════════════════════════════════════════════
