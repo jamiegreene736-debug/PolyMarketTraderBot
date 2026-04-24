@@ -99,7 +99,29 @@
       border-color: #92400e;
       color: #fbbf24;
     }
-    .btn-override:hover:not(:disabled) { filter: brightness(1.1); }
+	    .btn-override:hover:not(:disabled) { filter: brightness(1.1); }
+	    .position-actions {
+	      display: flex;
+	      align-items: center;
+	      gap: 8px;
+	      flex-wrap: wrap;
+	    }
+	    .btn-close-now {
+	      background: #7f1d1d;
+	      color: #fee2e2;
+	      border: 1px solid #ef4444;
+	      padding: 6px 10px;
+	      border-radius: 6px;
+	      cursor: pointer;
+	      font-size: 11px;
+	      font-weight: 700;
+	    }
+	    .btn-close-now:hover:not(:disabled) { background: #991b1b; }
+	    .btn-close-now:disabled,
+	    .btn-override:disabled {
+	      opacity: 0.6;
+	      cursor: wait;
+	    }
 
     .container { max-width: 1400px; margin: 0 auto; padding: 24px 32px; }
 
@@ -388,9 +410,10 @@
       transition: all 0.2s; pointer-events: none;
       z-index: 999;
     }
-    #toast.show { opacity: 1; transform: translateY(0); }
-    #toast.success { border-color: #22c55e; color: #4ade80; }
-    #toast.error { border-color: #ef4444; color: #f87171; }
+	    #toast.show { opacity: 1; transform: translateY(0); }
+	    #toast.success { border-color: #22c55e; color: #4ade80; }
+	    #toast.warning { border-color: #f59e0b; color: #fbbf24; }
+	    #toast.error { border-color: #ef4444; color: #f87171; }
   </style>
 </head>
 <body>
@@ -793,15 +816,28 @@
         const strategy  = (p.strategy || '—').replace(/_/g, ' ');
         const estPnl = Number(p.estimated_pnl || 0);
         const estPnlHtml = `<span class="${estPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${estPnl >= 0 ? '+' : ''}$${estPnl.toFixed(2)}</span>`;
-        const pendingExit = p.pending_exit_order_id;
-        const pendingExitDetail = pendingExit
-          ? `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">${Number(p.pending_exit_quantity || 0).toFixed(1)}x @ $${Number(p.pending_exit_price || 0).toFixed(4)}${p.pending_exit_age_label && p.pending_exit_age_label !== '—' ? ` · ${p.pending_exit_age_label}` : ''}</div>`
-          : '';
-        const actionCell = pendingExit
-          ? `<span style="color:#f59e0b; font-weight:700;" title="A sell order is resting on Polymarket and will close only if it fills.">Exit pending</span>`
-          : p.condition_id
-          ? `<button class="btn-override ${p.override_active ? 'active' : ''}" onclick="toggleAutoCloseOverride('${p.condition_id}', '${p.outcome}', ${p.override_active ? 'false' : 'true'}, this)">${p.override_active ? 'Resume Auto' : 'Override Auto'}</button>`
-          : '<span style="color:#475569;">Unavailable</span>';
+	        const pendingExit = p.pending_exit_order_id;
+	        const pendingExitDetail = pendingExit
+	          ? `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">${Number(p.pending_exit_quantity || 0).toFixed(1)}x @ $${Number(p.pending_exit_price || 0).toFixed(4)}${p.pending_exit_age_label && p.pending_exit_age_label !== '—' ? ` · ${p.pending_exit_age_label}` : ''}</div>`
+	          : '';
+	        const closePayload = encodeURIComponent(JSON.stringify({
+	          market_slug: p.market_slug,
+	          title: market,
+	          outcome: label,
+	          quantity: Number(p.quantity || 0),
+	        }));
+	        const closeButton = p.market_slug && p.market_slug !== '—'
+	          ? `<button class="btn-close-now" data-position="${closePayload}" onclick="closeLivePositionFromButton(this)">Close Now</button>`
+	          : '';
+	        const pendingStatus = pendingExit
+	          ? `<span style="color:#f59e0b; font-weight:700;" title="A sell order is resting on Polymarket and will close only if it fills.">Exit pending</span>`
+	          : '';
+	        const autoButton = p.condition_id
+	          ? `<button class="btn-override ${p.override_active ? 'active' : ''}" title="${p.override_active ? 'Let the bot auto-close this again' : 'Pause automatic close attempts for this position'}" onclick="toggleAutoCloseOverride('${p.condition_id}', '${p.outcome}', ${p.override_active ? 'false' : 'true'}, this)">${p.override_active ? 'Resume Auto' : 'Pause Auto'}</button>`
+	          : '';
+	        const actionCell = closeButton || autoButton || pendingStatus
+	          ? `<div class="position-actions">${closeButton}${autoButton}${pendingStatus}</div>`
+	          : '<span style="color:#475569;">Unavailable</span>';
         return `
           <tr id="row-${p.order_id || market}">
             <td>${strategy}</td>
@@ -829,7 +865,7 @@
     } catch (e) { /* silent */ }
   }
 
-  async function closePosition(orderId, btn) {
+	  async function closePosition(orderId, btn) {
     if (!confirm('Close this position? This will cancel the order immediately.')) return;
     btn.disabled = true;
     btn.textContent = 'Closing...';
@@ -851,12 +887,47 @@
       btn.disabled = false;
       btn.textContent = 'Close';
     }
-  }
+	  }
 
-  async function toggleAutoCloseOverride(conditionId, outcome, active, btn) {
+	  async function closeLivePositionFromButton(btn) {
+	    let payload;
+	    try {
+	      payload = JSON.parse(decodeURIComponent(btn.dataset.position || ''));
+	    } catch (e) {
+	      showToast('Could not read position details', 'error');
+	      return;
+	    }
+	    const market = payload.title || payload.market_slug || 'this position';
+	    if (!confirm(`Try to close ${market}? This submits an immediate sell. It can still fail if Polymarket has no matching bid.`)) return;
+	    btn.disabled = true;
+	    const original = btn.textContent;
+	    btn.textContent = 'Closing...';
+	    try {
+	      const res = await fetch('/api/close-live-position', {
+	        method: 'POST',
+	        headers: { 'Content-Type': 'application/json' },
+	        body: JSON.stringify(payload),
+	      });
+	      if (res.ok) {
+	        showToast('Manual close submitted. Refreshing position...', 'success');
+	        setTimeout(refreshPositions, 1500);
+	        return;
+	      }
+	      const err = await res.json();
+	      showToast(err.detail || 'Manual close did not fill', res.status === 409 ? 'warning' : 'error');
+	    } catch (e) {
+	      showToast('Network error while closing position', 'error');
+	    } finally {
+	      btn.disabled = false;
+	      btn.textContent = original;
+	      refreshPositions();
+	    }
+	  }
+
+	  async function toggleAutoCloseOverride(conditionId, outcome, active, btn) {
     btn.disabled = true;
     const original = btn.textContent;
-    btn.textContent = active ? 'Holding...' : 'Resuming...';
+	      btn.textContent = active ? 'Pausing...' : 'Resuming...';
     try {
       const res = await fetch('/api/auto-close-override', {
         method: 'POST',
@@ -871,7 +942,7 @@
         const err = await res.json();
         throw new Error(err.detail || 'Failed to update override');
       }
-      showToast(active ? 'Auto-close paused for this position' : 'Auto-close resumed for this position', 'success');
+	      showToast(active ? 'Auto-close paused. This does not close the position.' : 'Auto-close resumed for this position', 'success');
       await refreshPositions();
     } catch (e) {
       showToast(e.message || 'Override update failed', 'error');

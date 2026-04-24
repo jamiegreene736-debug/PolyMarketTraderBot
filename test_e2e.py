@@ -628,6 +628,14 @@ else:
             check("POST /api/circuit-breaker/reset returns 503 when bot stopped",
                   r.status_code == 503)
 
+            r = await client.post(
+                f"{base}/api/close-live-position",
+                auth=auth,
+                json={"market_slug": "test-market", "outcome": "YES", "quantity": 10},
+            )
+            check("POST /api/close-live-position returns 503 when bot stopped",
+                  r.status_code == 503)
+
             # Dashboard HTML
             r = await client.get(f"{base}/", auth=auth)
             check("GET / returns HTML", r.status_code == 200)

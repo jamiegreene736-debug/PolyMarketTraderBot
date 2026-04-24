@@ -22,6 +22,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from jinja2 import Environment, FileSystemLoader
 import secrets
 from loguru import logger
+from py_clob_client.order_builder.constants import SELL
 
 from src.logger import setup_logger
 from src.client import PolymarketClient
@@ -1512,6 +1513,83 @@ async def api_circuit_breaker_reset(_=Depends(verify_password)):
     logger.info(msg)
     await db.log_to_db("INFO", msg)
     return {"ok": True}
+
+
+@app.post("/api/close-live-position")
+async def api_close_live_position(payload: dict, _=Depends(verify_password)):
+    """Try to immediately sell a live position using a fill-and-kill exit."""
+    if _order_manager is None or _market_data_ref is None:
+        raise HTTPException(status_code=503, detail="Bot not running")
+
+    market_slug = str(payload.get("market_slug") or "").strip()
+    title = str(payload.get("title") or market_slug or "").strip()
+    outcome = str(payload.get("outcome") or "").upper().strip()
+    quantity = _safe_float(payload.get("quantity"))
+
+    if not market_slug or outcome not in {"YES", "NO"} or quantity <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="market_slug, outcome, and quantity are required",
+        )
+
+    bbo = await _market_data_ref.get_bbo(market_slug, force=True)
+    if not bbo:
+        raise HTTPException(status_code=409, detail="Could not fetch current market book")
+
+    try:
+        current_bid = float((bbo.get("bid") or {}).get("price", 0.0))
+        current_ask = float((bbo.get("ask") or {}).get("price", 1.0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=409, detail="Invalid market book returned")
+
+    if outcome == "YES":
+        intent = "ORDER_INTENT_BUY_LONG"
+        reference_bid = current_bid
+        exit_price = max(0.01, round(current_bid - 0.02, 4))
+    else:
+        intent = "ORDER_INTENT_BUY_SHORT"
+        reference_bid = round(1.0 - current_ask, 4)
+        exit_price = max(0.01, round(reference_bid - 0.02, 4))
+
+    pending_exit = _order_manager.get_pending_exit_order(market_slug, intent)
+    if pending_exit:
+        pending_id = str(pending_exit.get("order_id") or "")
+        if pending_id:
+            await _order_manager.cancel_order(pending_id)
+
+    oid = await _order_manager.place_order(
+        market_slug=market_slug,
+        question=title or market_slug,
+        intent=intent,
+        price=exit_price,
+        quantity=quantity,
+        strategy="manual_exit",
+        execution_side=SELL,
+        tif="TIME_IN_FORCE_FILL_AND_KILL",
+    )
+
+    if oid:
+        _account_cache["positions_ts"] = 0.0
+        msg = (
+            f"Manual close submitted for {market_slug}: "
+            f"{quantity:.1f}x {outcome} @ ${exit_price:.4f}"
+        )
+        logger.info(msg)
+        await db.log_to_db("INFO", msg)
+        return {"ok": True, "order_id": oid, "price": exit_price}
+
+    if getattr(_order_manager, "last_order_status", "") == "no_match":
+        detail = (
+            "No matching exit liquidity at the current/minimum tick. "
+            "The position remains open until a buyer appears or the market resolves."
+        )
+        logger.info(
+            f"Manual close no-fill for {market_slug}: "
+            f"reference_bid=${reference_bid:.4f}, attempted=${exit_price:.4f}"
+        )
+        raise HTTPException(status_code=409, detail=detail)
+
+    raise HTTPException(status_code=400, detail="Manual close order failed")
 
 
 @app.post("/api/close-position/{order_id}")
