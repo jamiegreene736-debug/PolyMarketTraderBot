@@ -1250,6 +1250,8 @@ async def api_positions(_=Depends(verify_password)):
         pending_exit_order_id = (pending_exit or {}).get("order_id") or ""
         pending_exit_price = _safe_float((pending_exit or {}).get("price"))
         pending_exit_quantity = _safe_float((pending_exit or {}).get("quantity"))
+        pending_exit_placed_at = _safe_float((pending_exit or {}).get("placed_at"))
+        pending_exit_age = max(0.0, now - pending_exit_placed_at) if pending_exit_placed_at else None
         positions.append({
             "order_id": "",
             "market_slug": market_slug,
@@ -1267,6 +1269,7 @@ async def api_positions(_=Depends(verify_password)):
             "pending_exit_order_id": pending_exit_order_id,
             "pending_exit_price": pending_exit_price,
             "pending_exit_quantity": pending_exit_quantity,
+            "pending_exit_age_label": _format_age_label(pending_exit_age),
             "age_label": _format_age_label(age_seconds),
             "max_hold_label": _format_age_label(max_hold_seconds),
             "placed_at_ts": placed_at or 0,

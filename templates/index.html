@@ -752,6 +752,7 @@
     });
 
     document.querySelectorAll('[data-force-exit-at-ts]').forEach(el => {
+      if (el.dataset.pendingExit === 'true') return;
       const forceExitAt = parseFloat(el.dataset.forceExitAtTs || '0');
       if (!forceExitAt) return;
       const remaining = forceExitAt - now;
@@ -794,10 +795,10 @@
         const estPnlHtml = `<span class="${estPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${estPnl >= 0 ? '+' : ''}$${estPnl.toFixed(2)}</span>`;
         const pendingExit = p.pending_exit_order_id;
         const pendingExitDetail = pendingExit
-          ? `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">${Number(p.pending_exit_quantity || 0).toFixed(1)}x @ $${Number(p.pending_exit_price || 0).toFixed(4)}</div>`
+          ? `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">${Number(p.pending_exit_quantity || 0).toFixed(1)}x @ $${Number(p.pending_exit_price || 0).toFixed(4)}${p.pending_exit_age_label && p.pending_exit_age_label !== '—' ? ` · ${p.pending_exit_age_label}` : ''}</div>`
           : '';
         const actionCell = pendingExit
-          ? `<span style="color:#f59e0b; font-weight:700;">Exit pending</span>`
+          ? `<span style="color:#f59e0b; font-weight:700;" title="A sell order is resting on Polymarket and will close only if it fills.">Exit pending</span>`
           : p.condition_id
           ? `<button class="btn-override ${p.override_active ? 'active' : ''}" onclick="toggleAutoCloseOverride('${p.condition_id}', '${p.outcome}', ${p.override_active ? 'false' : 'true'}, this)">${p.override_active ? 'Resume Auto' : 'Override Auto'}</button>`
           : '<span style="color:#475569;">Unavailable</span>';
@@ -813,6 +814,7 @@
               title="${p.force_exit_at || ''}"
               data-force-exit-at-ts="${p.force_exit_at_ts || 0}"
               data-max-hold-label="${p.max_hold_label || ''}"
+              data-pending-exit="${pendingExit ? 'true' : 'false'}"
             >
               ${p.force_exit_in_label || '—'}
               ${pendingExitDetail}
