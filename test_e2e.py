@@ -393,6 +393,25 @@ async def test_order_manager():
         check("FAK exit submit returns order_id", oid5 == "exit-fak-789", f"got {oid5!r}")
         check("FAK exit is not tracked as resting open order", om.get_total_open_orders() == 0)
 
+        mock_client.place_order = AsyncMock(return_value={
+            "id": "exit-no-fill-000",
+            "order_type": "FAK",
+            "status": "no_match",
+        })
+        oid6 = await om.place_order(
+            market_slug="will-btc-hit-100k",
+            question="Will BTC hit $100k?",
+            intent="ORDER_INTENT_BUY_LONG",
+            price=0.01,
+            quantity=50.0,
+            strategy="position_monitor",
+            execution_side="SELL",
+            tif="TIME_IN_FORCE_FILL_AND_KILL",
+        )
+        check("FAK no-liquidity exit returns None", oid6 is None, f"got {oid6!r}")
+        check("FAK no-liquidity status is not an error", om.last_order_status == "no_match")
+        check("FAK no-liquidity is not tracked", om.get_total_open_orders() == 0)
+
     finally:
         try:
             os.unlink(db_module.DB_PATH)

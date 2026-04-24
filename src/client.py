@@ -20,6 +20,7 @@ all strategies, order_manager, and market_data work without changes.
 
 import asyncio
 import json
+import re
 import httpx
 from loguru import logger
 from py_clob_client.client import ClobClient
@@ -888,11 +889,32 @@ class PolymarketClient:
         )
         order_type = self._order_type_from_tif(tif)
         signed_order = await asyncio.to_thread(self._client.create_order, args)
-        raw = await asyncio.to_thread(
-            self._client.post_order,
-            signed_order,
-            orderType=order_type,
-        )
+        try:
+            raw = await asyncio.to_thread(
+                self._client.post_order,
+                signed_order,
+                orderType=order_type,
+            )
+        except Exception as e:
+            error_text = str(e)
+            if (
+                order_type in {OrderType.FAK, OrderType.FOK}
+                and "no orders found to match" in error_text.lower()
+            ):
+                order_id_match = re.search(r"['\"]orderID['\"]:\s*['\"]([^'\"]+)['\"]", error_text)
+                oid = order_id_match.group(1) if order_id_match else ""
+                logger.info(
+                    f"Order no-fill: {intent} {side} {quantity:.1f}x @ ${price:.4f} "
+                    f"type={order_type} on {market_slug} — no matching liquidity"
+                )
+                return {
+                    "id": oid,
+                    "asset_id": token_id,
+                    "order_type": order_type,
+                    "status": "no_match",
+                    "raw_error": error_text,
+                }
+            raise
         result = raw if isinstance(raw, dict) else (vars(raw) if hasattr(raw, "__dict__") else {})
         oid    = (
             result.get("orderID") or result.get("order_id") or result.get("id") or ""

@@ -399,6 +399,11 @@ class PositionMonitorStrategy(BaseStrategy):
                     f"counting realized P&L"
                 )
                 exits += 1
+            elif getattr(self.order_manager, "last_order_status", "") == "no_match":
+                self.log(
+                    f"No exit liquidity for {slug} ({trigger}) at ${exit_price:.4f}; "
+                    f"will retry after cooldown"
+                )
             else:
                 self.log(f"Exit order failed for {slug} — position stays open", level="warning")
 

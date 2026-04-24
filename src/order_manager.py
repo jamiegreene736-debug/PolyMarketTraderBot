@@ -30,6 +30,7 @@ class OrderManager:
         self._lock = asyncio.Lock()
         self._request_times: list[float] = []
         self._rate_limit = 8                         # max requests per second
+        self.last_order_status = ""
 
     def attach_capital_manager(self, capital_manager):
         self.capital_manager = capital_manager
@@ -40,6 +41,7 @@ class OrderManager:
                           tif: str = "TIME_IN_FORCE_GOOD_TILL_CANCEL") -> str | None:
         execution_side = str(execution_side or BUY).upper()
         is_buy_order = execution_side != "SELL"
+        self.last_order_status = ""
 
         async with self._lock:
             if is_buy_order and len(self._open_orders) >= self.max_concurrent:
@@ -102,8 +104,22 @@ class OrderManager:
                 side=execution_side,
                 tif=tif,
             )
+            order_status = str(result.get("status") or "").lower()
+            if order_status == "no_match":
+                self.last_order_status = "no_match"
+                order_type = str(result.get("order_type") or "").upper()
+                msg = (
+                    f"[order] NO_FILL {intent} {execution_side} {quantity:.1f}x "
+                    f"@ ${price:.4f} type={order_type} on '{question[:40]}' — "
+                    "no matching liquidity"
+                )
+                logger.info(msg)
+                await db.log_to_db("INFO", msg)
+                return None
+
             order_id = result.get("id")
             if not order_id:
+                self.last_order_status = "no_order_id"
                 msg = f"[order] No order_id returned for {intent} @ ${price:.4f} on {market_slug} — result={result}"
                 logger.warning(msg)
                 await db.log_to_db("WARNING", msg)
@@ -112,6 +128,7 @@ class OrderManager:
             order_type = str(result.get("order_type") or "").upper()
             is_resting_order = order_type not in {"FOK", "FAK"}
             if not is_resting_order:
+                self.last_order_status = "submitted"
                 msg = (
                     f"[order] SUBMITTED {intent} {execution_side} {quantity:.1f}x "
                     f"@ ${price:.4f} type={order_type} on '{question[:40]}' id={order_id}"
@@ -151,9 +168,11 @@ class OrderManager:
                 quantity=quantity,
                 order_id=order_id,
             )
+            self.last_order_status = "placed"
             return order_id
 
         except Exception as e:
+            self.last_order_status = "error"
             msg = f"[order] FAILED {intent} @ ${price:.4f} on {market_slug}: {e}"
             logger.error(msg)
             await db.log_to_db("ERROR", msg)
