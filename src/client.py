@@ -537,6 +537,40 @@ class PolymarketClient:
             logger.debug(f"get_order_book({slug}): {e}")
             return {}
 
+    async def get_outcome_order_book(self, slug: str, outcome: str) -> dict:
+        """Return the live CLOB book for the YES or NO token of a market."""
+        tokens = await self._ensure_tokens(slug)
+        if not tokens:
+            return {}
+
+        outcome_key = str(outcome or "").upper()
+        token_id = tokens["no_token_id"] if outcome_key == "NO" else tokens["yes_token_id"]
+
+        try:
+            ob = await asyncio.to_thread(self._client.get_order_book, token_id)
+            fee_rate_bps = await asyncio.to_thread(self._client.get_fee_rate_bps, token_id)
+            return {
+                "token_id": token_id,
+                "fee_rate_bps": fee_rate_bps or 0,
+                "bids": [
+                    {
+                        "price": self._safe_float(getattr(b, "price", None)),
+                        "size": self._safe_float(getattr(b, "size", None)),
+                    }
+                    for b in (ob.bids or [])
+                ],
+                "asks": [
+                    {
+                        "price": self._safe_float(getattr(a, "price", None)),
+                        "size": self._safe_float(getattr(a, "size", None)),
+                    }
+                    for a in (ob.asks or [])
+                ],
+            }
+        except Exception as e:
+            logger.debug(f"get_outcome_order_book({slug}, {outcome_key}): {e}")
+            return {}
+
     async def get_bbo(self, slug: str) -> dict:
         """
         Best bid/offer for the YES token of a market.

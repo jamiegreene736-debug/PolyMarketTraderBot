@@ -433,6 +433,16 @@ def test_order_type_mapping():
 test_order_type_mapping()
 
 
+def test_fee_rate_quote_math():
+    from src import fees
+
+    fee = fees.taker_fee_for_rate(100, 0.50, 30)
+    check("fee-rate quote math: 30 base fee at 50c on 100 shares = $0.75",
+          abs(fee - 0.75) < 0.00001, f"fee={fee}")
+
+test_fee_rate_quote_math()
+
+
 async def test_open_order_token_hydration():
     from src.client import PolymarketClient
 

@@ -814,8 +814,15 @@
         const label     = p.outcome || (p.intent.includes('BUY_LONG') ? 'YES' : 'NO');
         const market    = p.title || p.market_slug || '—';
         const strategy  = (p.strategy || '—').replace(/_/g, ' ');
-        const estPnl = Number(p.estimated_pnl || 0);
-        const estPnlHtml = `<span class="${estPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${estPnl >= 0 ? '+' : ''}$${estPnl.toFixed(2)}</span>`;
+        const quote = p.close_quote || {};
+        const hasCloseLiquidity = !!quote.has_liquidity;
+        const estPnl = p.estimated_pnl === null || p.estimated_pnl === undefined ? null : Number(p.estimated_pnl);
+        const quoteDetail = hasCloseLiquidity
+          ? `<div style="color:#64748b; font-size:11px; margin-top:2px;" title="Gross proceeds minus estimated exit taker fee. Entry fees, if any, may already be sunk and are not always exposed by Polymarket position data.">close ${Number(quote.fillable_qty || 0).toFixed(1)}x @ avg $${Number(quote.avg_exit_price || 0).toFixed(4)} · fee $${Number(quote.exit_fee || 0).toFixed(5)}</div>${quote.fully_fillable ? '' : `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">partial only; ${Number(quote.unfilled_qty || 0).toFixed(1)}x no bid</div>`}`
+          : '<div style="color:#f59e0b; font-size:11px; margin-top:2px;">no executable bid</div>';
+        const estPnlHtml = estPnl === null
+          ? `<span style="color:#f59e0b; font-weight:700;">No bid</span>${quoteDetail}`
+          : `<span class="${estPnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${estPnl >= 0 ? '+' : ''}$${estPnl.toFixed(2)}</span>${quoteDetail}`;
 	        const pendingExit = p.pending_exit_order_id;
 	        const pendingExitDetail = pendingExit
 	          ? `<div style="color:#f59e0b; font-size:11px; margin-top:2px;">${Number(p.pending_exit_quantity || 0).toFixed(1)}x @ $${Number(p.pending_exit_price || 0).toFixed(4)}${p.pending_exit_age_label && p.pending_exit_age_label !== '—' ? ` · ${p.pending_exit_age_label}` : ''}</div>`
@@ -824,7 +831,9 @@
 	          market_slug: p.market_slug,
 	          title: market,
 	          outcome: label,
+	          entry_price: Number(p.price || 0),
 	          quantity: Number(p.quantity || 0),
+	          quote,
 	        }));
 	        const closeButton = p.market_slug && p.market_slug !== '—'
 	          ? `<button class="btn-close-now" data-position="${closePayload}" onclick="closeLivePositionFromButton(this)">Close Now</button>`
@@ -898,7 +907,11 @@
 	      return;
 	    }
 	    const market = payload.title || payload.market_slug || 'this position';
-	    if (!confirm(`Try to close ${market}? This submits an immediate sell. It can still fail if Polymarket has no matching bid.`)) return;
+	    const quote = payload.quote || {};
+	    const quoteLine = quote.has_liquidity
+	      ? `\n\nCurrent executable quote: ${Number(quote.fillable_qty || 0).toFixed(1)} shares @ avg $${Number(quote.avg_exit_price || 0).toFixed(4)}, est. net P&L ${Number(quote.net_pnl || 0) >= 0 ? '+' : ''}$${Number(quote.net_pnl || 0).toFixed(2)} after est. exit fee $${Number(quote.exit_fee || 0).toFixed(5)}.${quote.fully_fillable ? '' : `\nOnly a partial close is currently quoted; ${Number(quote.unfilled_qty || 0).toFixed(1)} shares have no executable bid.`}`
+	      : '\n\nCurrent executable quote: no bid. This will likely not fill.';
+	    if (!confirm(`Try to close ${market}? This submits an immediate sell. It can still fail if Polymarket liquidity changes before the order arrives.${quoteLine}`)) return;
 	    btn.disabled = true;
 	    const original = btn.textContent;
 	    btn.textContent = 'Closing...';

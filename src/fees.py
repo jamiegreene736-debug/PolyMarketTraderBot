@@ -1,14 +1,15 @@
 """
-Polymarket.us Fee & Rebate Calculator
-======================================
-Fee formula (Polymarket.us):
-  Taker fee    = 0.05   × quantity × price × (1 − price)
-  Maker rebate = 0.0125 × quantity × price × (1 − price)
+Polymarket Fee & Rebate Calculator
+==================================
+Fee formula:
+  Taker fee    = feeRate × quantity × price × (1 − price)
+  Maker rebate = rebateRate × quantity × price × (1 − price)
 
 The formula means fees are HIGHEST at price=$0.50 and approach
 zero near $0.01 or $0.99 — rewarding near-certain trades.
 
-50% taker rebate is applied weekly through April 30, 2026.
+The live fee rate is per-market/per-token. The fixed 0.05 helpers below are
+legacy defaults; use taker_fee_for_rate() when quoting live closes.
 """
 
 
@@ -29,6 +30,20 @@ def maker_rebate_per_share(price: float) -> float:
 def taker_fee(quantity: float, price: float) -> float:
     """Total taker fee for an order."""
     return 0.05 * quantity * price * (1 - price)
+
+
+def taker_fee_for_rate(quantity: float, price: float, fee_rate_bps: int | float | None) -> float:
+    """
+    Total taker fee for an order using Polymarket's token-specific base fee.
+
+    The CLOB fee-rate endpoint returns values like 30 for a 0.03 fee rate.
+    """
+    try:
+        raw_rate = float(fee_rate_bps or 0)
+    except (TypeError, ValueError):
+        raw_rate = 0.0
+    fee_rate = raw_rate / 1000.0
+    return quantity * fee_rate * price * (1 - price)
 
 
 def maker_rebate(quantity: float, price: float) -> float:

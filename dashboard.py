@@ -30,6 +30,7 @@ from src.market_data import MarketData
 from src.order_manager import OrderManager
 from src.capital_manager import CapitalManager
 from src import database as db
+from src import fees
 from src.ai_observer import AIObserver
 
 from src.strategies.near_certainty import NearCertaintyStrategy
@@ -780,6 +781,77 @@ def _open_order_position_fallback() -> list[dict]:
     return rows
 
 
+async def _get_close_quote(
+    market_slug: str,
+    outcome: str,
+    quantity: float,
+    entry_price: float,
+) -> dict:
+    """
+    Quote what Close Now can actually sell into right now.
+
+    Uses the live token order book, not Gamma marks. If there is no bid, the
+    displayed P&L should say so instead of showing a theoretical mark.
+    """
+    if _client_ref is None:
+        return {}
+
+    book = await _client_ref.get_outcome_order_book(market_slug, outcome)
+    raw_bids = book.get("bids") or []
+    bids = sorted(
+        (
+            {
+                "price": _safe_float(level.get("price")),
+                "size": _safe_float(level.get("size")),
+            }
+            for level in raw_bids
+        ),
+        key=lambda level: level["price"],
+        reverse=True,
+    )
+
+    remaining = max(0.0, float(quantity or 0.0))
+    fillable_qty = 0.0
+    gross_proceeds = 0.0
+    exit_fee = 0.0
+    fee_rate_bps = _safe_float(book.get("fee_rate_bps"))
+    best_bid = bids[0]["price"] if bids else 0.0
+    best_bid_size = bids[0]["size"] if bids else 0.0
+
+    for level in bids:
+        price = level["price"]
+        size = level["size"]
+        if remaining <= 0:
+            break
+        if price < 0.01 or size <= 0:
+            continue
+        fill_qty = min(remaining, size)
+        gross_proceeds += fill_qty * price
+        exit_fee += fees.taker_fee_for_rate(fill_qty, price, fee_rate_bps)
+        fillable_qty += fill_qty
+        remaining -= fill_qty
+
+    net_proceeds = gross_proceeds - exit_fee
+    cost_basis = fillable_qty * float(entry_price or 0.0)
+    net_pnl = net_proceeds - cost_basis
+    avg_exit_price = gross_proceeds / fillable_qty if fillable_qty > 0 else 0.0
+
+    return {
+        "best_bid": best_bid,
+        "best_bid_size": best_bid_size,
+        "fee_rate_bps": fee_rate_bps,
+        "fillable_qty": fillable_qty,
+        "unfilled_qty": max(0.0, float(quantity or 0.0) - fillable_qty),
+        "avg_exit_price": avg_exit_price,
+        "gross_proceeds": gross_proceeds,
+        "exit_fee": exit_fee,
+        "net_proceeds": net_proceeds,
+        "net_pnl": net_pnl,
+        "has_liquidity": fillable_qty > 0,
+        "fully_fillable": fillable_qty >= float(quantity or 0.0) - 1e-9,
+    }
+
+
 async def _get_live_closed_positions(limit: int = 150) -> list[dict]:
     if _client_ref is None:
         return []
@@ -1222,6 +1294,26 @@ async def api_positions(_=Depends(verify_password)):
             *[_market_data_ref.get_bbo(slug) if slug else asyncio.sleep(0, result={}) for slug in slugs]
         )
         bbo_map = {slug: bbo or {} for slug, bbo in zip(slugs, bbos)}
+    close_quote_map: dict[tuple[str, str], dict] = {}
+    quote_tasks = []
+    quote_keys = []
+    for p in raw_positions:
+        slug = str(p.get("slug") or "").strip()
+        outcome = str(p.get("outcome") or "").upper()
+        if not slug or outcome not in {"YES", "NO"}:
+            continue
+        quote_keys.append((slug, outcome))
+        quote_tasks.append(
+            _get_close_quote(
+                slug,
+                outcome,
+                _safe_float(p.get("size")),
+                _safe_float(p.get("avgPrice")),
+            )
+        )
+    if quote_tasks:
+        quote_results = await asyncio.gather(*quote_tasks)
+        close_quote_map = {key: quote or {} for key, quote in zip(quote_keys, quote_results)}
 
     now = datetime.utcnow().timestamp()
     positions = []
@@ -1287,11 +1379,8 @@ async def api_positions(_=Depends(verify_password)):
             force_exit_at_ts = float(placed_at) + max_hold_seconds
             force_exit_in = force_exit_at_ts - now
             force_exit_at = datetime.utcfromtimestamp(force_exit_at_ts).isoformat()
-        estimated_pnl = (
-            (current_bid - avg_price) * size
-            if outcome == "YES"
-            else (round(1.0 - current_ask, 4) - avg_price) * size
-        )
+        close_quote = close_quote_map.get((str(p.get("slug") or "").strip(), outcome), {})
+        estimated_pnl = close_quote.get("net_pnl") if close_quote.get("has_liquidity") else None
         override_active = (condition_id, outcome) in override_keys
         pending_exit_order_id = (pending_exit or {}).get("order_id") or ""
         pending_exit_price = _safe_float((pending_exit or {}).get("price"))
@@ -1307,10 +1396,25 @@ async def api_positions(_=Depends(verify_password)):
             "price": avg_price,
             "quantity": size,
             "current_value": current_value,
+            "cost_basis": round(avg_price * size, 2),
             "outcome": p.get("outcome") or "—",
             "strategy": strategy,
             "closable": False,
-            "estimated_pnl": round(estimated_pnl, 2),
+            "estimated_pnl": round(float(estimated_pnl), 2) if estimated_pnl is not None else None,
+            "close_quote": {
+                "has_liquidity": bool(close_quote.get("has_liquidity")),
+                "fully_fillable": bool(close_quote.get("fully_fillable")),
+                "best_bid": round(_safe_float(close_quote.get("best_bid")), 4),
+                "best_bid_size": round(_safe_float(close_quote.get("best_bid_size")), 2),
+                "fillable_qty": round(_safe_float(close_quote.get("fillable_qty")), 2),
+                "unfilled_qty": round(_safe_float(close_quote.get("unfilled_qty")), 2),
+                "avg_exit_price": round(_safe_float(close_quote.get("avg_exit_price")), 4),
+                "gross_proceeds": round(_safe_float(close_quote.get("gross_proceeds")), 4),
+                "exit_fee": round(_safe_float(close_quote.get("exit_fee")), 5),
+                "net_proceeds": round(_safe_float(close_quote.get("net_proceeds")), 4),
+                "net_pnl": round(_safe_float(close_quote.get("net_pnl")), 4),
+                "fee_rate_bps": round(_safe_float(close_quote.get("fee_rate_bps")), 4),
+            },
             "override_active": override_active,
             "pending_exit_order_id": pending_exit_order_id,
             "pending_exit_price": pending_exit_price,
@@ -1518,7 +1622,7 @@ async def api_circuit_breaker_reset(_=Depends(verify_password)):
 @app.post("/api/close-live-position")
 async def api_close_live_position(payload: dict, _=Depends(verify_password)):
     """Try to immediately sell a live position using a fill-and-kill exit."""
-    if _order_manager is None or _market_data_ref is None:
+    if _order_manager is None or _client_ref is None:
         raise HTTPException(status_code=503, detail="Bot not running")
 
     market_slug = str(payload.get("market_slug") or "").strip()
@@ -1532,24 +1636,24 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
             detail="market_slug, outcome, and quantity are required",
         )
 
-    bbo = await _market_data_ref.get_bbo(market_slug, force=True)
-    if not bbo:
-        raise HTTPException(status_code=409, detail="Could not fetch current market book")
+    quote = await _get_close_quote(
+        market_slug,
+        outcome,
+        quantity,
+        _safe_float(payload.get("entry_price")),
+    )
+    if not quote.get("has_liquidity"):
+        detail = (
+            "No matching exit liquidity at the current/minimum tick. "
+            "The position remains open until a buyer appears or the market resolves."
+        )
+        logger.info(f"Manual close no-fill for {market_slug}: no executable bid")
+        raise HTTPException(status_code=409, detail=detail)
 
-    try:
-        current_bid = float((bbo.get("bid") or {}).get("price", 0.0))
-        current_ask = float((bbo.get("ask") or {}).get("price", 1.0))
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=409, detail="Invalid market book returned")
-
-    if outcome == "YES":
-        intent = "ORDER_INTENT_BUY_LONG"
-        reference_bid = current_bid
-        exit_price = max(0.01, round(current_bid - 0.02, 4))
-    else:
-        intent = "ORDER_INTENT_BUY_SHORT"
-        reference_bid = round(1.0 - current_ask, 4)
-        exit_price = max(0.01, round(reference_bid - 0.02, 4))
+    intent = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
+    # Close Now is intentionally aggressive: sell into any currently executable
+    # bid at or above Polymarket's minimum tick.
+    exit_price = 0.01
 
     pending_exit = _order_manager.get_pending_exit_order(market_slug, intent)
     if pending_exit:
@@ -1585,7 +1689,7 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
         )
         logger.info(
             f"Manual close no-fill for {market_slug}: "
-            f"reference_bid=${reference_bid:.4f}, attempted=${exit_price:.4f}"
+            f"best_bid=${_safe_float(quote.get('best_bid')):.4f}, attempted=${exit_price:.4f}"
         )
         raise HTTPException(status_code=409, detail=detail)
 
