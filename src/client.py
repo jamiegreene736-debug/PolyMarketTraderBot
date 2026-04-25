@@ -20,7 +20,10 @@ all strategies, order_manager, and market_data work without changes.
 
 import asyncio
 import json
+import os
 import re
+import threading
+import time
 import httpx
 from loguru import logger
 from py_clob_client.client import ClobClient
@@ -29,6 +32,7 @@ from py_clob_client.clob_types import (
     OrderType,
 )
 from py_clob_client.order_builder.constants import BUY, SELL
+from py_clob_client.http_helpers import helpers as clob_http_helpers
 
 GAMMA_API = "https://gamma-api.polymarket.com"
 CLOB_HOST = "https://clob.polymarket.com"
@@ -37,6 +41,33 @@ CHAIN_ID  = 137  # Polygon mainnet
 SIG_TYPE_EOA = 0
 SIG_TYPE_POLY_PROXY = 1
 SIG_TYPE_POLY_GNOSIS_SAFE = 2
+_CLOB_HTTP_CLIENT_LOCK = threading.Lock()
+_CLOB_HTTP_CLIENT_MODE = "proxy"
+
+
+def _install_clob_http_client(mode: str):
+    """
+    py-clob-client uses one module-level httpx.Client with trust_env=True.
+    Replacing it lets us retry private CLOB calls direct when the proxy path is
+    the broken piece, without changing public Data/Gamma reads.
+    """
+    global _CLOB_HTTP_CLIENT_MODE
+    mode = "direct" if mode == "direct" else "proxy"
+    with _CLOB_HTTP_CLIENT_LOCK:
+        if _CLOB_HTTP_CLIENT_MODE == mode:
+            return
+        old_client = getattr(clob_http_helpers, "_http_client", None)
+        clob_http_helpers._http_client = httpx.Client(
+            http2=True,
+            trust_env=(mode != "direct"),
+            timeout=20.0,
+        )
+        _CLOB_HTTP_CLIENT_MODE = mode
+        try:
+            if old_client is not None:
+                old_client.close()
+        except Exception:
+            pass
 
 
 class PolymarketClient:
@@ -80,6 +111,13 @@ class PolymarketClient:
         self._last_markets: list[dict] = []
         self._last_positions: dict[tuple, list] = {}
         self._last_closed_positions: dict[tuple, list] = {}
+        self._last_open_orders: list[dict] | None = None
+        self._last_successful_clob_mode = ""
+        self._clob_call_lock = threading.Lock()
+        self._clob_transport_cooldown_until = 0.0
+        self._clob_transport_cooldown_seconds = 45.0
+        self._last_clob_transport_log = 0.0
+        self._last_clob_transport_error = ""
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -98,6 +136,94 @@ class PolymarketClient:
             signature_type=signature_type,
             funder=funder,
         )
+
+    def _clob_modes(self) -> list[str]:
+        mode = os.getenv("POLY_CLOB_HTTP_MODE", "auto").strip().lower()
+        if mode == "direct":
+            return ["direct"]
+        if mode == "proxy":
+            return ["proxy"]
+
+        if self._last_successful_clob_mode in {"proxy", "direct"}:
+            other = "direct" if self._last_successful_clob_mode == "proxy" else "proxy"
+            return [self._last_successful_clob_mode, other]
+        return ["proxy", "direct"]
+
+    @staticmethod
+    def _is_clob_transport_error(error: Exception) -> bool:
+        text = f"{type(error).__name__}: {error}".lower()
+        return any(
+            marker in text
+            for marker in (
+                "request exception",
+                "status_code=none",
+                "connecttimeout",
+                "connectionerror",
+                "readtimeout",
+                "proxyerror",
+                "network is unreachable",
+                "temporary failure",
+                "timed out",
+                "timeout",
+            )
+        )
+
+    def _mark_clob_transport_failure(self, error: Exception):
+        now = time.monotonic()
+        self._clob_transport_cooldown_until = now + self._clob_transport_cooldown_seconds
+        self._last_clob_transport_error = str(error)
+        if now - self._last_clob_transport_log >= 30:
+            self._last_clob_transport_log = now
+            logger.warning(
+                "CLOB private API transport unavailable; cooling down "
+                f"{int(self._clob_transport_cooldown_seconds)}s: {error}"
+            )
+
+    def _clob_cooldown_remaining(self) -> int:
+        remaining = self._clob_transport_cooldown_until - time.monotonic()
+        return max(0, int(remaining))
+
+    def clob_health(self) -> dict:
+        return {
+            "private_api_cooling_down": self._clob_cooldown_remaining() > 0,
+            "cooldown_remaining_seconds": self._clob_cooldown_remaining(),
+            "last_successful_mode": self._last_successful_clob_mode or _CLOB_HTTP_CLIENT_MODE,
+            "last_transport_error": self._last_clob_transport_error,
+            "balance_cached": self._last_balance is not None,
+            "open_orders_cached": self._last_open_orders is not None,
+        }
+
+    def _call_clob_sync(self, func, *args, **kwargs):
+        failures: list[str] = []
+        transport_seen = False
+        with self._clob_call_lock:
+            modes = self._clob_modes()
+            for index, mode in enumerate(modes):
+                try:
+                    _install_clob_http_client(mode)
+                    result = func(*args, **kwargs)
+                    self._last_successful_clob_mode = mode
+                    self._clob_transport_cooldown_until = 0.0
+                    self._last_clob_transport_error = ""
+                    return result
+                except Exception as e:
+                    is_transport = self._is_clob_transport_error(e)
+                    transport_seen = transport_seen or is_transport
+                    failures.append(f"{mode}: {e}")
+                    should_retry = (
+                        index + 1 < len(modes)
+                        and is_transport
+                    )
+                    if should_retry:
+                        logger.warning(
+                            f"CLOB private API failed via {mode}; retrying via {modes[index + 1]}: {e}"
+                        )
+                        continue
+                    if is_transport or transport_seen:
+                        self._mark_clob_transport_failure(e)
+                    if len(failures) > 1:
+                        raise RuntimeError("; ".join(failures)) from e
+                    raise
 
     def _extract_balance_usdc(self, raw: dict | None) -> float:
         if not isinstance(raw, dict):
@@ -183,6 +309,7 @@ class PolymarketClient:
         ):
             try:
                 raw = await asyncio.to_thread(
+                    self._call_clob_sync,
                     probe_client.get_balance_allowance,
                     BalanceAllowanceParams(
                         asset_type=AssetType.COLLATERAL,
@@ -208,7 +335,10 @@ class PolymarketClient:
 
         if not effective_funder:
             try:
-                api_keys_resp = await asyncio.to_thread(probe_client.get_api_keys)
+                api_keys_resp = await asyncio.to_thread(
+                    self._call_clob_sync,
+                    probe_client.get_api_keys,
+                )
                 logger.info(f"CLOB get_api_keys raw: {api_keys_resp}")
                 discovered = self._extract_proxy_address(api_keys_resp)
                 if discovered:
@@ -241,6 +371,7 @@ class PolymarketClient:
                         funder=effective_funder,
                     )
                     raw = await asyncio.to_thread(
+                        self._call_clob_sync,
                         funded_client.get_balance_allowance,
                         BalanceAllowanceParams(
                             asset_type=AssetType.COLLATERAL,
@@ -310,7 +441,10 @@ class PolymarketClient:
         Falls back to the env-provided creds if derivation is unavailable.
         """
         try:
-            derived = await asyncio.to_thread(self._client.create_or_derive_api_creds)
+            derived = await asyncio.to_thread(
+                self._call_clob_sync,
+                self._client.create_or_derive_api_creds,
+            )
             if not derived:
                 raise RuntimeError("create_or_derive_api_creds returned no credentials")
 
@@ -336,6 +470,7 @@ class PolymarketClient:
         """
         try:
             await asyncio.to_thread(
+                self._call_clob_sync,
                 self._client.update_balance_allowance,
                 BalanceAllowanceParams(
                     asset_type=AssetType.COLLATERAL,
@@ -358,6 +493,7 @@ class PolymarketClient:
 
         try:
             await asyncio.to_thread(
+                self._call_clob_sync,
                 self._client.update_balance_allowance,
                 BalanceAllowanceParams(
                     asset_type=AssetType.CONDITIONAL,
@@ -530,6 +666,7 @@ class PolymarketClient:
             return {}
         try:
             ob = await asyncio.to_thread(
+                self._call_clob_sync,
                 self._client.get_order_book, tokens["yes_token_id"]
             )
             return {
@@ -550,8 +687,16 @@ class PolymarketClient:
         token_id = tokens["no_token_id"] if outcome_key == "NO" else tokens["yes_token_id"]
 
         try:
-            ob = await asyncio.to_thread(self._client.get_order_book, token_id)
-            fee_rate_bps = await asyncio.to_thread(self._client.get_fee_rate_bps, token_id)
+            ob = await asyncio.to_thread(
+                self._call_clob_sync,
+                self._client.get_order_book,
+                token_id,
+            )
+            fee_rate_bps = await asyncio.to_thread(
+                self._call_clob_sync,
+                self._client.get_fee_rate_bps,
+                token_id,
+            )
             return {
                 "token_id": token_id,
                 "fee_rate_bps": fee_rate_bps or 0,
@@ -621,11 +766,25 @@ class PolymarketClient:
         Polymarket CLOB returns balance as a string in micro-USDC (6 decimals)
         e.g. {"balance": "36000000.0", "allowance": "..."} → $36.00
         """
+        cooldown_remaining = self._clob_cooldown_remaining()
+        if cooldown_remaining > 0 and self._last_balance is not None:
+            logger.warning(
+                "get_balance using cached balance while CLOB private API cools down "
+                f"({cooldown_remaining}s remaining)"
+            )
+            return {**self._last_balance, "stale": True}
+        if cooldown_remaining > 0:
+            raise RuntimeError(
+                f"CLOB private API cooling down ({cooldown_remaining}s remaining); "
+                "cash balance unavailable"
+            )
+
         try:
             # Polymarket documents getBalanceAllowance as a cached value. Refresh
             # the collateral snapshot first so proxy-wallet balances do not stay at 0.
             try:
                 await asyncio.to_thread(
+                    self._call_clob_sync,
                     self._client.update_balance_allowance,
                     BalanceAllowanceParams(
                         asset_type=AssetType.COLLATERAL,
@@ -636,6 +795,7 @@ class PolymarketClient:
                 logger.warning(f"get_balance refresh failed: {refresh_error}")
 
             raw = await asyncio.to_thread(
+                self._call_clob_sync,
                 self._client.get_balance_allowance,
                 BalanceAllowanceParams(
                     asset_type=AssetType.COLLATERAL,
@@ -836,7 +996,24 @@ class PolymarketClient:
         Fetch open orders from the CLOB and normalise for order_manager.sync_from_exchange.
         """
         try:
-            raw    = await asyncio.to_thread(self._client.get_orders, OpenOrderParams())
+            cooldown_remaining = self._clob_cooldown_remaining()
+            if cooldown_remaining > 0:
+                if self._last_open_orders is not None:
+                    logger.warning(
+                        "get_open_orders using cached order list while CLOB private API "
+                        f"cools down ({cooldown_remaining}s remaining)"
+                    )
+                    return [dict(order) for order in self._last_open_orders]
+                raise RuntimeError(
+                    f"CLOB private API cooling down ({cooldown_remaining}s remaining); "
+                    "open orders unavailable"
+                )
+
+            raw = await asyncio.to_thread(
+                self._call_clob_sync,
+                self._client.get_orders,
+                OpenOrderParams(),
+            )
             orders = raw if isinstance(raw, list) else (raw or {}).get("data", []) or []
             raw_dicts = [
                 o if isinstance(o, dict) else (vars(o) if hasattr(o, "__dict__") else {})
@@ -881,10 +1058,16 @@ class PolymarketClient:
                     "price":          float(od.get("price", 0) or 0),
                     "quantity":       quantity,
                 })
+            self._last_open_orders = [dict(order) for order in result]
             return result
         except Exception as e:
             logger.warning(f"get_open_orders failed: {type(e).__name__}: {e!r}")
-            return []
+            if self._last_open_orders is not None:
+                logger.warning(
+                    f"get_open_orders using {len(self._last_open_orders)} cached order(s) after upstream failure"
+                )
+                return [dict(order) for order in self._last_open_orders]
+            raise
 
     async def place_order(
         self,
@@ -928,6 +1111,7 @@ class PolymarketClient:
         signed_order = await asyncio.to_thread(self._client.create_order, args)
         try:
             raw = await asyncio.to_thread(
+                self._call_clob_sync,
                 self._client.post_order,
                 signed_order,
                 orderType=order_type,
@@ -968,7 +1152,11 @@ class PolymarketClient:
             logger.info(f"[DRY RUN] Cancel {order_id}")
             return True
         try:
-            await asyncio.to_thread(self._client.cancel, order_id)
+            await asyncio.to_thread(
+                self._call_clob_sync,
+                self._client.cancel,
+                order_id,
+            )
             logger.info(f"Order cancelled: {order_id}")
             return True
         except Exception as e:
@@ -980,7 +1168,10 @@ class PolymarketClient:
             logger.info("[DRY RUN] Cancel all orders")
             return True
         try:
-            await asyncio.to_thread(self._client.cancel_all)
+            await asyncio.to_thread(
+                self._call_clob_sync,
+                self._client.cancel_all,
+            )
             logger.info("All orders cancelled")
             return True
         except Exception as e:

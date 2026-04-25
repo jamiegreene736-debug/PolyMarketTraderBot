@@ -66,6 +66,10 @@ _ai_observer: "AIObserver | None" = None
 _account_cache = {
     "balance": 0.0,
     "balance_ts": 0.0,
+    "balance_available": False,
+    "balance_stale": False,
+    "balance_source": "unavailable",
+    "balance_error": "",
     "positions": [],
     "positions_ts": 0.0,
     "closed_positions": [],
@@ -168,6 +172,10 @@ async def run_bot_loop():
         if startup_balance > 0:
             _account_cache["balance"] = startup_balance
             _account_cache["balance_ts"] = asyncio.get_event_loop().time()
+            _account_cache["balance_available"] = True
+            _account_cache["balance_stale"] = False
+            _account_cache["balance_source"] = "clob"
+            _account_cache["balance_error"] = ""
     except asyncio.TimeoutError:
         msg = f"Startup balance fetch timed out after {startup_balance_timeout:.0f}s; continuing with fallback balance"
         logger.warning(msg)
@@ -330,6 +338,10 @@ async def run_bot_loop():
                                     capital.update_balance(balance)
                                     _account_cache["balance"] = balance
                                     _account_cache["balance_ts"] = asyncio.get_event_loop().time()
+                                    _account_cache["balance_available"] = True
+                                    _account_cache["balance_stale"] = False
+                                    _account_cache["balance_source"] = "clob"
+                                    _account_cache["balance_error"] = ""
                                     _bot_state["degraded_reason"] = None
                                 # Snapshot against exchange-truth realized P&L, not local
                                 # placeholder close rows from earlier buggy exit paths.
@@ -720,6 +732,9 @@ async def _get_cached_balance(max_age_seconds: float = 30.0) -> float:
     cached = _safe_float(_account_cache.get("balance"))
     cached_ts = _safe_float(_account_cache.get("balance_ts"))
     if cached > 0 and now - cached_ts <= max_age_seconds:
+        _account_cache["balance_available"] = True
+        _account_cache["balance_stale"] = False
+        _account_cache["balance_source"] = _account_cache.get("balance_source") or "cache"
         return cached
 
     if _client_ref is not None:
@@ -735,14 +750,42 @@ async def _get_cached_balance(max_age_seconds: float = 30.0) -> float:
             if cash > 0:
                 _account_cache["balance"] = cash
                 _account_cache["balance_ts"] = now
+                _account_cache["balance_available"] = True
+                _account_cache["balance_stale"] = bool(cash_data.get("stale"))
+                _account_cache["balance_source"] = "clob_cache" if cash_data.get("stale") else "clob"
+                _account_cache["balance_error"] = ""
                 return cash
         except Exception as e:
             logger.warning(f"Dashboard balance refresh failed, using cached balance: {e}")
+            _account_cache["balance_error"] = str(e)
 
     if cached > 0:
+        _account_cache["balance_available"] = True
+        _account_cache["balance_stale"] = True
+        _account_cache["balance_source"] = _account_cache.get("balance_source") or "memory_cache"
         return cached
+
+    try:
+        latest = await db.get_latest_balance_snapshot()
+    except Exception:
+        latest = None
+    if latest and _safe_float(latest.get("balance_usdc")) > 0:
+        cash = _safe_float(latest.get("balance_usdc"))
+        _account_cache["balance"] = cash
+        _account_cache["balance_ts"] = 0.0
+        _account_cache["balance_available"] = True
+        _account_cache["balance_stale"] = True
+        _account_cache["balance_source"] = "last_snapshot"
+        return cash
+
     if _capital is not None and _capital.total_usdc > 0:
+        _account_cache["balance_available"] = True
+        _account_cache["balance_stale"] = True
+        _account_cache["balance_source"] = "runtime_capital"
         return float(_capital.total_usdc)
+    _account_cache["balance_available"] = False
+    _account_cache["balance_stale"] = False
+    _account_cache["balance_source"] = "unavailable"
     return 0.0
 
 
@@ -1318,6 +1361,10 @@ async def api_reset_data(_=Depends(verify_password)):
     _account_cache.update({
         "balance": 0.0,
         "balance_ts": 0.0,
+        "balance_available": False,
+        "balance_stale": False,
+        "balance_source": "unavailable",
+        "balance_error": "",
         "positions": [],
         "positions_ts": 0.0,
         "closed_positions": [],
@@ -1356,6 +1403,10 @@ async def api_positions(_=Depends(verify_password)):
         return {
             "positions": positions,
             "cash_balance": round(cash, 2),
+            "cash_balance_available": cash > 0,
+            "cash_balance_stale": False,
+            "cash_balance_source": "runtime" if cash > 0 else "unavailable",
+            "cash_balance_error": "",
             "position_value": round(position_value, 2),
             "total": round(cash + position_value, 2),
             "source": "local",
@@ -1376,6 +1427,10 @@ async def api_positions(_=Depends(verify_password)):
         return {
             "positions": positions,
             "cash_balance": round(cash, 2),
+            "cash_balance_available": bool(_account_cache.get("balance_available")),
+            "cash_balance_stale": bool(_account_cache.get("balance_stale")),
+            "cash_balance_source": str(_account_cache.get("balance_source") or "unavailable"),
+            "cash_balance_error": str(_account_cache.get("balance_error") or ""),
             "position_value": round(position_value, 2),
             "total": round(cash + position_value, 2),
             "source": "local_open_orders",
@@ -1608,8 +1663,13 @@ async def api_positions(_=Depends(verify_password)):
     return {
         "positions": positions,
         "cash_balance": round(cash, 2),
+        "cash_balance_available": bool(_account_cache.get("balance_available")),
+        "cash_balance_stale": bool(_account_cache.get("balance_stale")),
+        "cash_balance_source": str(_account_cache.get("balance_source") or "unavailable"),
+        "cash_balance_error": str(_account_cache.get("balance_error") or ""),
         "position_value": round(position_value, 2),
         "total": round(total, 2),
+        "clob_health": _client_ref.clob_health() if _client_ref is not None else {},
         "source": "live",
     }
 

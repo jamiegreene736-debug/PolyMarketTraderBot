@@ -793,9 +793,19 @@
       const data = await res.json();
 
       // Balance cards
-      document.getElementById('cashBalance').textContent    = '$' + data.cash_balance.toFixed(2);
-      document.getElementById('positionValue').textContent  = '$' + data.position_value.toFixed(2);
-      document.getElementById('totalBalance').textContent   = '$' + data.total.toFixed(2);
+      const cashKnown = data.cash_balance_available !== false;
+      const cashStale = !!data.cash_balance_stale;
+      const cashEl = document.getElementById('cashBalance');
+      cashEl.textContent = cashKnown
+        ? '$' + Number(data.cash_balance || 0).toFixed(2) + (cashStale ? ' stale' : '')
+        : 'Unavailable';
+      cashEl.title = cashKnown
+        ? `Cash source: ${data.cash_balance_source || 'unknown'}${cashStale ? ' (last known; CLOB private API is currently unavailable)' : ''}`
+        : `CLOB private API is unavailable, so the bot cannot verify cash balance right now.${data.cash_balance_error ? ' ' + data.cash_balance_error : ''}`;
+      document.getElementById('positionValue').textContent  = '$' + Number(data.position_value || 0).toFixed(2);
+      document.getElementById('totalBalance').textContent   = cashKnown
+        ? '$' + Number(data.total || 0).toFixed(2)
+        : '≥ $' + Number(data.position_value || 0).toFixed(2);
       const positionLabel = data.source === 'local_open_orders' ? ' open order' : ' live position';
       document.getElementById('positionCount').textContent  = data.positions.length + positionLabel + (data.positions.length !== 1 ? 's' : '');
       const opEl = document.getElementById('statOpenPositions');

@@ -175,6 +175,19 @@ async def snapshot_balance(balance: float, realized_pnl: float, unrealized_pnl: 
         await db.commit()
 
 
+async def get_latest_balance_snapshot() -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT timestamp, balance_usdc, realized_pnl, unrealized_pnl
+            FROM balance_snapshots
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
 async def log_to_db(level: str, message: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""

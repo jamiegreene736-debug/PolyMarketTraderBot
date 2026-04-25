@@ -614,6 +614,32 @@ async def test_open_order_token_hydration():
 asyncio.run(test_open_order_token_hydration())
 
 
+async def test_clob_direct_fallback():
+    from src.client import PolymarketClient
+
+    client = PolymarketClient("", "", "", "", dry_run=True)
+    calls = []
+
+    def flaky_private_call():
+        calls.append("call")
+        if len(calls) == 1:
+            raise Exception("PolyApiException[status_code=None, error_message=Request exception!]")
+        return {"ok": True}
+
+    try:
+        result = await asyncio.to_thread(client._call_clob_sync, flaky_private_call)
+        check("CLOB private call retries after transport failure",
+              result == {"ok": True},
+              f"result={result}")
+        check("CLOB fallback attempted second path",
+              len(calls) == 2,
+              f"calls={len(calls)}")
+    finally:
+        await client.close()
+
+asyncio.run(test_clob_direct_fallback())
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Tier 6 — Strategy Initialization
 # ══════════════════════════════════════════════════════════════════════════════
