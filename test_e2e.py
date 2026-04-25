@@ -467,6 +467,46 @@ def test_fee_rate_quote_math():
 test_fee_rate_quote_math()
 
 
+async def test_ai_observer_remediation_gate():
+    from src.ai_observer import AIObserver
+
+    original_path = db_module.DB_PATH
+    db_module.DB_PATH = tempfile.mktemp(suffix=".db")
+    await db_module.init_db()
+
+    try:
+        observer = AIObserver({
+            "enabled": True,
+            "active_remediation_enabled": True,
+            "remediation_pause_seconds": 60,
+        })
+        observer._verify_remediation = AsyncMock(
+            return_value=(True, "safe reversible pause", "test-verifier")
+        )
+        await observer._store_report({
+            "category": "glitch",
+            "severity": "critical",
+            "title": "Repeated operational noise detected",
+            "summary": "Saw repeated failed exits.",
+            "recommendation": "Pause new entries while exits continue.",
+            "recommended_action": "pause",
+        })
+        check("AI repair pauses new entries after verifier approval",
+              observer.entry_pause_active())
+        state = observer.remediation_state()
+        check("AI repair records verifier provider",
+              (state.get("last_remediation") or {}).get("approved_by") == "test-verifier",
+              f"state={state}")
+    finally:
+        try:
+            os.unlink(db_module.DB_PATH)
+        except Exception:
+            pass
+        db_module.DB_PATH = original_path
+
+asyncio.run(test_ai_observer_remediation_gate())
+
+
 async def test_open_order_token_hydration():
     from src.client import PolymarketClient
 

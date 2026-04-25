@@ -412,26 +412,36 @@ async def run_bot_loop():
                     logger.warning(msg)
                     await db.log_to_db("WARNING", msg)
 
-                entries_paused = not bool(market_snapshot)
+                ai_repair_paused = bool(
+                    _ai_observer is not None and _ai_observer.entry_pause_active()
+                )
+                entries_paused = not bool(market_snapshot) or ai_repair_paused
                 if entries_paused:
-                    market_data_failures += 1
-                    msg = (
-                        "Market data unavailable; skipping new-entry strategies this tick "
-                        f"(failure {market_data_failures}/3)."
-                    )
-                    _bot_state["last_error"] = msg
-                    logger.warning(msg)
-                    await db.log_to_db("WARNING", msg)
-                    if market_data_failures >= 3:
-                        msg = (
-                            "Polymarket market/data APIs unavailable for 3 consecutive ticks; "
-                            "pausing bot to avoid trading against empty/stale market data."
+                    if ai_repair_paused:
+                        _bot_state["last_error"] = (
+                            "AI repair pause active: new-entry strategies paused for "
+                            f"{_ai_observer.entry_pause_remaining_seconds()}s; "
+                            "position_monitor continues managing exits."
                         )
-                        _bot_state["status"] = "error"
+                    else:
+                        market_data_failures += 1
+                        msg = (
+                            "Market data unavailable; skipping new-entry strategies this tick "
+                            f"(failure {market_data_failures}/3)."
+                        )
                         _bot_state["last_error"] = msg
                         logger.warning(msg)
                         await db.log_to_db("WARNING", msg)
-                        break
+                        if market_data_failures >= 3:
+                            msg = (
+                                "Polymarket market/data APIs unavailable for 3 consecutive ticks; "
+                                "pausing bot to avoid trading against empty/stale market data."
+                            )
+                            _bot_state["status"] = "error"
+                            _bot_state["last_error"] = msg
+                            logger.warning(msg)
+                            await db.log_to_db("WARNING", msg)
+                            break
                 else:
                     market_data_failures = 0
 
@@ -1221,6 +1231,9 @@ async def api_status(_=Depends(verify_password)):
         if age > 120:
             state["status"] = "error"
             state["last_error"] = f"No heartbeat for {int(age)}s"
+
+    if _ai_observer is not None:
+        state["ai_repair"] = _ai_observer.remediation_state()
 
     return state
 

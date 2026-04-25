@@ -25,13 +25,18 @@ DEFAULT_CONFIG = {
     "recent_loss_streak_threshold": 3,
     "recent_pnl_window": 5,
     "critical_recent_loss_usdc": 0.25,
+    "active_remediation_enabled": False,
+    "remediation_pause_seconds": 1800,
+    "remediation_verifier_provider": "auto",
 }
 
 
 class AIObserver:
     """
-    Advisory sidecar that watches logs and realized P&L.
-    It never places orders or edits config; it only emits findings.
+    Reliability sidecar that watches logs and realized P&L.
+
+    In advisory mode it only emits findings. In active remediation mode it can
+    apply narrowly scoped runtime safety actions after an AI verifier agrees.
     """
 
     def __init__(self, config: dict | None = None):
@@ -49,11 +54,18 @@ class AIObserver:
         self.recent_loss_streak_threshold = max(2, int(cfg.get("recent_loss_streak_threshold", 3)))
         self.recent_pnl_window = max(3, int(cfg.get("recent_pnl_window", 5)))
         self.critical_recent_loss_usdc = max(0.01, float(cfg.get("critical_recent_loss_usdc", 0.25)))
+        self.active_remediation_enabled = bool(cfg.get("active_remediation_enabled", False))
+        self.remediation_pause_seconds = max(60, int(cfg.get("remediation_pause_seconds", 1800)))
+        self.remediation_verifier_provider = str(
+            cfg.get("remediation_verifier_provider", "auto")
+        ).strip().lower()
 
         self._anthropic_client = None
         self._openai_client = None
         self._last_run = 0.0
         self._analysis_task: asyncio.Task | None = None
+        self._entry_pause_until = 0.0
+        self._last_remediation: dict | None = None
 
     def maybe_schedule(
         self,
@@ -117,6 +129,20 @@ class AIObserver:
                 await self._store_report(report)
         except Exception as e:
             logger.warning(f"[ai_observer] analysis failed: {e}")
+
+    def entry_pause_active(self) -> bool:
+        return asyncio.get_event_loop().time() < self._entry_pause_until
+
+    def entry_pause_remaining_seconds(self) -> int:
+        remaining = self._entry_pause_until - asyncio.get_event_loop().time()
+        return max(0, int(remaining))
+
+    def remediation_state(self) -> dict:
+        return {
+            "active": self.entry_pause_active(),
+            "remaining_seconds": self.entry_pause_remaining_seconds(),
+            "last_remediation": self._last_remediation,
+        }
 
     def _build_heuristic_reports(self, logs: list[dict], snapshot: dict) -> list[dict]:
         reports: list[dict] = []
@@ -300,6 +326,8 @@ class AIObserver:
         if not inserted:
             return
 
+        await self._maybe_apply_remediation(normalized)
+
         if not self.write_to_logs:
             return
 
@@ -311,6 +339,97 @@ class AIObserver:
         )
         await db.log_to_db(level, message)
         getattr(logger, level.lower())(message)
+
+    async def _maybe_apply_remediation(self, report: dict):
+        if not self.active_remediation_enabled:
+            return
+
+        action = self._plan_remediation(report)
+        if not action:
+            return
+
+        approved, verifier_reason, verifier_provider = await self._verify_remediation(report, action)
+        if not approved:
+            msg = (
+                f"[ai_repair] Proposed action rejected or unverified: {action['action']} | "
+                f"reason={verifier_reason}"
+            )
+            await db.log_to_db("INFO", msg)
+            logger.info(msg)
+            return
+
+        now = asyncio.get_event_loop().time()
+        pause_until = now + int(action.get("duration_seconds") or self.remediation_pause_seconds)
+        self._entry_pause_until = max(self._entry_pause_until, pause_until)
+        self._last_remediation = {
+            **action,
+            "approved_by": verifier_provider,
+            "verifier_reason": verifier_reason,
+            "applied_at": datetime.utcnow().isoformat(),
+        }
+        msg = (
+            f"[ai_repair] Applied {action['action']} for "
+            f"{int(action.get('duration_seconds') or self.remediation_pause_seconds)}s | "
+            f"verified_by={verifier_provider} | reason={verifier_reason}"
+        )
+        await db.log_to_db("WARNING", msg)
+        logger.warning(msg)
+
+    def _plan_remediation(self, report: dict) -> dict | None:
+        category = str(report.get("category") or "").lower()
+        severity = str(report.get("severity") or "").lower()
+        recommended_action = str(report.get("recommended_action") or "").lower()
+        title = str(report.get("title") or "")
+        summary = str(report.get("summary") or "")
+        text = f"{title} {summary}".lower()
+
+        should_pause = (
+            recommended_action == "pause"
+            or severity == "critical"
+            or "repeated operational noise" in text
+            or "[order] failed" in text
+            or "exit order failed" in text
+        )
+        if not should_pause:
+            return None
+
+        return {
+            "action": "pause_new_entries",
+            "duration_seconds": self.remediation_pause_seconds,
+            "keep_position_monitor_running": True,
+            "reason": (
+                "Repeated operational/P&L issue detected; pause new entries while "
+                "position_monitor keeps managing exits."
+            ),
+            "source_category": category,
+            "source_severity": severity,
+            "source_title": title[:100],
+        }
+
+    async def _verify_remediation(self, report: dict, action: dict) -> tuple[bool, str, str]:
+        provider = self._resolved_verifier_provider()
+        if provider == "none":
+            return False, "No verifier model API key configured", "none"
+
+        prompt = (
+            "You are the second-check safety reviewer for a live trading bot repair agent.\n"
+            "A first AI/heuristic found an issue and proposed ONE runtime action.\n"
+            "Approve only if the action is conservative, reversible, and does not place trades.\n"
+            "Return STRICT JSON only with keys: approved (boolean), reason (string).\n\n"
+            f"Finding:\n{json.dumps(report, ensure_ascii=True)}\n\n"
+            f"Proposed action:\n{json.dumps(action, ensure_ascii=True)}"
+        )
+
+        try:
+            raw = await self._ask_provider(provider, prompt, max_tokens=180)
+            parsed = json.loads(self._extract_json(raw))
+            if isinstance(parsed, dict):
+                approved = bool(parsed.get("approved"))
+                reason = str(parsed.get("reason") or "").strip()[:220]
+                return approved, reason or "Verifier returned no reason", provider
+        except Exception as e:
+            return False, f"Verifier failed: {e}", provider
+        return False, "Verifier did not return an approval object", provider
 
     def _resolved_provider(self) -> str:
         if self.provider == "anthropic":
@@ -325,6 +444,28 @@ class AIObserver:
             return "openai"
         return "heuristic"
 
+    def _resolved_verifier_provider(self) -> str:
+        preferred = self.remediation_verifier_provider
+        primary = self._resolved_provider()
+
+        if preferred == "anthropic":
+            return "anthropic" if os.getenv("ANTHROPIC_API_KEY") else "none"
+        if preferred == "openai":
+            return "openai" if os.getenv("OPENAI_API_KEY") else "none"
+        if preferred == "heuristic":
+            return "none"
+
+        # Prefer a different provider than the analyzer when possible.
+        if primary != "openai" and os.getenv("OPENAI_API_KEY"):
+            return "openai"
+        if primary != "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
+            return "anthropic"
+        if os.getenv("ANTHROPIC_API_KEY"):
+            return "anthropic"
+        if os.getenv("OPENAI_API_KEY"):
+            return "openai"
+        return "none"
+
     def _get_anthropic(self) -> anthropic.AsyncAnthropic:
         if self._anthropic_client is None:
             api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -334,10 +475,20 @@ class AIObserver:
         return self._anthropic_client
 
     async def _ask_anthropic(self, prompt: str) -> str:
+        return await self._ask_provider("anthropic", prompt, max_tokens=350)
+
+    async def _ask_provider(self, provider: str, prompt: str, max_tokens: int = 350) -> str:
+        if provider == "anthropic":
+            return await self._ask_anthropic_with_tokens(prompt, max_tokens=max_tokens)
+        if provider == "openai":
+            return await self._ask_openai_with_tokens(prompt, max_tokens=max_tokens)
+        raise RuntimeError(f"Unsupported provider: {provider}")
+
+    async def _ask_anthropic_with_tokens(self, prompt: str, max_tokens: int = 350) -> str:
         client = self._get_anthropic()
         message = await client.messages.create(
             model=self.model,
-            max_tokens=350,
+            max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
             timeout=20.0,
         )
@@ -354,10 +505,13 @@ class AIObserver:
         return self._openai_client
 
     async def _ask_openai(self, prompt: str) -> str:
+        return await self._ask_openai_with_tokens(prompt, max_tokens=350)
+
+    async def _ask_openai_with_tokens(self, prompt: str, max_tokens: int = 350) -> str:
         client = self._get_openai()
         response = await client.chat.completions.create(
             model=self.openai_model,
-            max_tokens=350,
+            max_tokens=max_tokens,
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}],
             timeout=20.0,

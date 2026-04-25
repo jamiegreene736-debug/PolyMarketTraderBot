@@ -22,6 +22,9 @@ ai_observer:
   recent_loss_streak_threshold: 3
   recent_pnl_window: 5
   critical_recent_loss_usdc: 0.25
+  active_remediation_enabled: true   # Let AI repair agent pause new entries after verifier approval
+  remediation_verifier_provider: auto # Prefer a second provider/model when available
+  remediation_pause_seconds: 1800     # 30m pause; position_monitor keeps managing exits
 
 capital:
   reserve_pct: 10
