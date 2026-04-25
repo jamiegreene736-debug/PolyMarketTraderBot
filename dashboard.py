@@ -208,14 +208,12 @@ async def run_bot_loop():
                 await db.log_to_db("WARNING", msg)
         elif not startup_balance_available:
             msg = (
-                "Startup balance unavailable from CLOB; pausing bot instead of "
-                "starting with a fake $0 balance. Check upstream connectivity and retry Start."
+                "Startup balance unavailable from CLOB; starting in exit-management "
+                "mode with $0 fresh-buy capacity until balance refresh recovers."
             )
-            _bot_state["status"] = "error"
             _bot_state["last_error"] = msg
             logger.warning(msg)
             await db.log_to_db("WARNING", msg)
-            return
 
     capital = CapitalManager(
         total_usdc=startup_balance,

@@ -62,10 +62,13 @@ class PolymarketClient:
 
         # py-clob-client (requests) picks up HTTPS_PROXY env var automatically,
         # routing CLOB order traffic through the proxy to bypass geoblocks.
-        # The Gamma API (httpx below) is not geoblocked so needs no proxy.
+        # Public Gamma/Data API reads should not use that paid CLOB proxy:
+        # when httpx inherited HTTPS_PROXY here, public account reads started
+        # returning proxy-level 402 responses and the bot could not start.
         self._http = httpx.AsyncClient(
             timeout=12,
             headers={"User-Agent": "polymarket-bot/1.0"},
+            trust_env=False,
         )
         # slug → {"condition_id": str, "yes_token_id": str, "no_token_id": str}
         self._slug_tokens: dict[str, dict] = {}
