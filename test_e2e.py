@@ -433,6 +433,48 @@ async def test_order_manager():
         check("FAK no-liquidity status is not an error", om.last_order_status == "no_match")
         check("FAK no-liquidity is not tracked", om.get_total_open_orders() == 0)
 
+        # Transient CLOB transport failures should enter cooldown instead of
+        # hammering the endpoint and creating repeated ERROR noise.
+        transport_client = MagicMock()
+        transport_client.place_order = AsyncMock(
+            side_effect=Exception(
+                "PolyApiException[status_code=None, error_message=Request exception!]"
+            )
+        )
+        om_transport = OrderManager(transport_client, max_concurrent=5)
+        oid_transport = await om_transport.place_order(
+            market_slug="transport-market",
+            question="Transport market?",
+            intent="ORDER_INTENT_BUY_LONG",
+            price=0.01,
+            quantity=50.0,
+            strategy="position_monitor",
+            execution_side="SELL",
+            tif="TIME_IN_FORCE_FILL_AND_KILL",
+        )
+        check("transport failure returns None", oid_transport is None)
+        check("transport failure sets cooldown status",
+              om_transport.last_order_status == "transport_error",
+              f"status={om_transport.last_order_status!r}")
+
+        oid_cooldown = await om_transport.place_order(
+            market_slug="transport-market",
+            question="Transport market?",
+            intent="ORDER_INTENT_BUY_LONG",
+            price=0.01,
+            quantity=50.0,
+            strategy="position_monitor",
+            execution_side="SELL",
+            tif="TIME_IN_FORCE_FILL_AND_KILL",
+        )
+        check("transport cooldown returns None", oid_cooldown is None)
+        check("transport cooldown does not call CLOB again",
+              transport_client.place_order.await_count == 1,
+              f"calls={transport_client.place_order.await_count}")
+        check("transport cooldown status is explicit",
+              om_transport.last_order_status == "transport_cooldown",
+              f"status={om_transport.last_order_status!r}")
+
     finally:
         try:
             os.unlink(db_module.DB_PATH)
@@ -452,6 +494,36 @@ def test_order_type_mapping():
     check("client maps FOK tif", PolymarketClient._order_type_from_tif("TIME_IN_FORCE_FILL_OR_KILL") == OrderType.FOK)
 
 test_order_type_mapping()
+
+
+def test_ai_observer_degraded_mode():
+    from src.ai_observer import AIObserver
+
+    observer = AIObserver({"enabled": True})
+    reports = observer._build_heuristic_reports(
+        [],
+        {
+            "bot_status": "running",
+            "last_error": (
+                "Startup balance unavailable from CLOB; starting in exit-management "
+                "mode with $0 fresh-buy capacity until balance refresh recovers."
+            ),
+            "closed_positions": [],
+        },
+    )
+    check("observer does not call degraded running mode fatal",
+          not any(r.get("title") == "Bot entered an error state" for r in reports),
+          f"reports={reports}")
+
+    error_reports = observer._build_heuristic_reports(
+        [],
+        {"bot_status": "error", "last_error": "real crash", "closed_positions": []},
+    )
+    check("observer still flags true error status",
+          any(r.get("title") == "Bot entered an error state" for r in error_reports),
+          f"reports={error_reports}")
+
+test_ai_observer_degraded_mode()
 
 
 def test_fee_rate_quote_math():

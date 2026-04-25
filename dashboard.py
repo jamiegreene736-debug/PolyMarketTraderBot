@@ -52,6 +52,7 @@ _bot_state = {
     "status": "stopped",        # stopped | running | error
     "last_heartbeat": None,
     "last_error": None,
+    "degraded_reason": None,
     "task": None,               # asyncio.Task reference
 }
 
@@ -211,6 +212,7 @@ async def run_bot_loop():
                 "Startup balance unavailable from CLOB; starting in exit-management "
                 "mode with $0 fresh-buy capacity until balance refresh recovers."
             )
+            _bot_state["degraded_reason"] = msg
             _bot_state["last_error"] = msg
             logger.warning(msg)
             await db.log_to_db("WARNING", msg)
@@ -328,6 +330,7 @@ async def run_bot_loop():
                                     capital.update_balance(balance)
                                     _account_cache["balance"] = balance
                                     _account_cache["balance_ts"] = asyncio.get_event_loop().time()
+                                    _bot_state["degraded_reason"] = None
                                 # Snapshot against exchange-truth realized P&L, not local
                                 # placeholder close rows from earlier buggy exit paths.
                                 try:
@@ -413,7 +416,8 @@ async def run_bot_loop():
                 ai_repair_paused = bool(
                     _ai_observer is not None and _ai_observer.entry_pause_active()
                 )
-                entries_paused = not bool(market_snapshot) or ai_repair_paused
+                balance_degraded = not dry_run and capital.total_usdc < 1.0
+                entries_paused = not bool(market_snapshot) or ai_repair_paused or balance_degraded
                 if entries_paused:
                     if ai_repair_paused:
                         _bot_state["last_error"] = (
@@ -421,6 +425,18 @@ async def run_bot_loop():
                             f"{_ai_observer.entry_pause_remaining_seconds()}s; "
                             "position_monitor continues managing exits."
                         )
+                    elif balance_degraded:
+                        msg = (
+                            "Fresh-buy capacity unavailable: new-entry strategies paused "
+                            "until CLOB balance refresh recovers; position_monitor continues "
+                            "managing exits."
+                        )
+                        already_logged = _bot_state.get("degraded_reason") == msg
+                        _bot_state["degraded_reason"] = msg
+                        _bot_state["last_error"] = msg
+                        if not already_logged:
+                            logger.info(msg)
+                            await db.log_to_db("INFO", msg)
                     else:
                         market_data_failures += 1
                         msg = (
@@ -442,6 +458,7 @@ async def run_bot_loop():
                             break
                 else:
                     market_data_failures = 0
+                    _bot_state["degraded_reason"] = None
 
                 for s in enabled:
                     try:
@@ -463,7 +480,7 @@ async def run_bot_loop():
                         balance=capital.total_usdc,
                         open_orders=order_manager.get_total_open_orders(),
                         bot_status=_bot_state.get("status", "unknown"),
-                        last_error=_bot_state.get("last_error"),
+                        last_error=_bot_state.get("last_error") or _bot_state.get("degraded_reason"),
                         closed_positions=recent_closed,
                         session_start_ts=session_start_ts,
                     )
@@ -471,6 +488,7 @@ async def run_bot_loop():
                 _bot_state["last_heartbeat"] = datetime.utcnow().isoformat()
                 if not entries_paused:
                     _bot_state["last_error"] = None
+                    _bot_state["degraded_reason"] = None
 
             except Exception as e:
                 _bot_state["last_error"] = str(e)
@@ -511,6 +529,7 @@ async def _auto_restart_bot():
         logger.info("Auto-starting bot loop...")
         _bot_state["status"] = "running"
         _bot_state["last_error"] = None
+        _bot_state["degraded_reason"] = None
         task = asyncio.create_task(run_bot_loop())
         _bot_state["task"] = task
         try:
@@ -1245,6 +1264,7 @@ async def api_start(_=Depends(verify_password)):
     # Signal supervisor to resume (it polls for status != "stopped")
     _bot_state["status"] = "running"
     _bot_state["last_error"] = None
+    _bot_state["degraded_reason"] = None
     logger.info("Bot start requested via dashboard")
     return {"status": "running"}
 

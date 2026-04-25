@@ -158,13 +158,25 @@ class AIObserver:
         if noisy_messages:
             repeated_message, repeated_count = noisy_messages.most_common(1)[0]
 
-        if snapshot.get("bot_status") == "error" or snapshot.get("last_error"):
+        bot_status = str(snapshot.get("bot_status") or "").lower()
+        last_error = str(snapshot.get("last_error") or "").strip()
+        is_degraded_notice = self._is_degraded_notice(last_error)
+
+        if bot_status == "error":
             reports.append({
                 "category": "glitch",
                 "severity": "critical",
                 "title": "Bot entered an error state",
-                "summary": snapshot.get("last_error") or "The supervisor marked the bot as errored.",
+                "summary": last_error or "The supervisor marked the bot as errored.",
                 "recommendation": "Check the newest ERROR log lines before restarting so the same failure does not loop.",
+            })
+        elif last_error and not is_degraded_notice:
+            reports.append({
+                "category": "glitch",
+                "severity": "warning",
+                "title": "Bot reported a runtime warning",
+                "summary": last_error,
+                "recommendation": "Review the warning context, but do not treat this as a fatal bot stop unless the supervisor status is error.",
             })
         elif levels.get("ERROR", 0) > 0 or repeated_count >= self.repeated_error_threshold:
             summary = (
@@ -284,6 +296,7 @@ class AIObserver:
             "Do not flag scheduled countdown or idle logs as stalls when they clearly describe an intentional interval.\n"
             "Do not flag 'Idle:' strategy logs as glitches; they mean the strategy intentionally found no safe action.\n"
             "Do not flag '[order] WAIT' capacity logs as critical P&L by themselves; they are preflight risk controls, not failed orders.\n"
+            "Do not classify exit-management mode, AI repair pauses, fresh-buy capacity pauses, or market-data preflight pauses as fatal bot errors when bot_status is running; those are degraded-safe modes.\n"
             "Only flag capacity as critical when there are actual ERROR/WARNING order failures, worsening realized P&L, or bot error state.\n"
             "Focus on concrete anomalies visible in the logs or realized P&L.\n"
             "Do not suggest autonomous code edits, config rewrites, or placing new trades.\n"
@@ -407,8 +420,8 @@ class AIObserver:
         }
 
     async def _verify_remediation(self, report: dict, action: dict) -> tuple[bool, str, str]:
-        provider = self._resolved_verifier_provider()
-        if provider == "none":
+        providers = self._resolved_verifier_providers()
+        if not providers:
             return False, "No verifier model API key configured", "none"
 
         prompt = (
@@ -420,16 +433,19 @@ class AIObserver:
             f"Proposed action:\n{json.dumps(action, ensure_ascii=True)}"
         )
 
-        try:
-            raw = await self._ask_provider(provider, prompt, max_tokens=180)
-            parsed = json.loads(self._extract_json(raw))
-            if isinstance(parsed, dict):
-                approved = bool(parsed.get("approved"))
-                reason = str(parsed.get("reason") or "").strip()[:220]
-                return approved, reason or "Verifier returned no reason", provider
-        except Exception as e:
-            return False, f"Verifier failed: {e}", provider
-        return False, "Verifier did not return an approval object", provider
+        failures: list[str] = []
+        for provider in providers:
+            try:
+                raw = await self._ask_provider(provider, prompt, max_tokens=180)
+                parsed = json.loads(self._extract_json(raw))
+                if isinstance(parsed, dict):
+                    approved = bool(parsed.get("approved"))
+                    reason = str(parsed.get("reason") or "").strip()[:220]
+                    return approved, reason or "Verifier returned no reason", provider
+                failures.append(f"{provider}: no approval object")
+            except Exception as e:
+                failures.append(f"{provider}: {e}")
+        return False, f"Verifier failed: {'; '.join(failures)[:240]}", providers[0]
 
     def _resolved_provider(self) -> str:
         if self.provider == "anthropic":
@@ -445,26 +461,28 @@ class AIObserver:
         return "heuristic"
 
     def _resolved_verifier_provider(self) -> str:
+        providers = self._resolved_verifier_providers()
+        return providers[0] if providers else "none"
+
+    def _resolved_verifier_providers(self) -> list[str]:
         preferred = self.remediation_verifier_provider
         primary = self._resolved_provider()
 
-        if preferred == "anthropic":
-            return "anthropic" if os.getenv("ANTHROPIC_API_KEY") else "none"
-        if preferred == "openai":
-            return "openai" if os.getenv("OPENAI_API_KEY") else "none"
-        if preferred == "heuristic":
-            return "none"
-
-        # Prefer a different provider than the analyzer when possible.
-        if primary != "openai" and os.getenv("OPENAI_API_KEY"):
-            return "openai"
-        if primary != "anthropic" and os.getenv("ANTHROPIC_API_KEY"):
-            return "anthropic"
+        available = []
         if os.getenv("ANTHROPIC_API_KEY"):
-            return "anthropic"
+            available.append("anthropic")
         if os.getenv("OPENAI_API_KEY"):
-            return "openai"
-        return "none"
+            available.append("openai")
+
+        if preferred in {"anthropic", "openai"}:
+            return [preferred] if preferred in available else []
+        if preferred == "heuristic":
+            return []
+
+        # Prefer a different provider than the analyzer when possible, but keep
+        # a fallback so a transient verifier timeout does not disable repair.
+        ordered = [p for p in available if p != primary] + [p for p in available if p == primary]
+        return ordered
 
     def _get_anthropic(self) -> anthropic.AsyncAnthropic:
         if self._anthropic_client is None:
@@ -555,6 +573,23 @@ class AIObserver:
             "recommendation": recommendation,
             "recommended_action": recommended_action,
         }
+
+    @staticmethod
+    def _is_degraded_notice(message: str) -> bool:
+        text = str(message or "").lower()
+        if not text:
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "exit-management mode",
+                "fresh-buy capacity",
+                "ai repair pause active",
+                "market data unavailable; skipping new-entry",
+                "fresh entries paused",
+                "new-entry strategies paused",
+            )
+        )
 
     @staticmethod
     def _extract_json(raw: str) -> str:

@@ -422,6 +422,14 @@ class PositionMonitorStrategy(BaseStrategy):
                     f"No exit liquidity for {slug} ({trigger}) at ${exit_price:.4f}; "
                     f"will retry after cooldown"
                 )
+            elif getattr(self.order_manager, "last_order_status", "") in {
+                "transport_error",
+                "transport_cooldown",
+            }:
+                self.log(
+                    f"CLOB order API unavailable for {slug}; exit remains queued and "
+                    "will retry after transport cooldown"
+                )
             else:
                 self.log(f"Exit order failed for {slug} — position stays open", level="warning")
 

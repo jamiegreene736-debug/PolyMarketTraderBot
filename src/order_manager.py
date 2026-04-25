@@ -31,6 +31,9 @@ class OrderManager:
         self._request_times: list[float] = []
         self._rate_limit = 8                         # max requests per second
         self.last_order_status = ""
+        self._order_transport_cooldown_until = 0.0
+        self._order_transport_cooldown_seconds = 300
+        self._last_transport_cooldown_log = 0.0
 
     def attach_capital_manager(self, capital_manager):
         self.capital_manager = capital_manager
@@ -42,6 +45,20 @@ class OrderManager:
         execution_side = str(execution_side or BUY).upper()
         is_buy_order = execution_side != "SELL"
         self.last_order_status = ""
+        now = time.time()
+
+        if self._order_transport_cooldown_until > now:
+            self.last_order_status = "transport_cooldown"
+            remaining = int(self._order_transport_cooldown_until - now)
+            if now - self._last_transport_cooldown_log >= 60:
+                self._last_transport_cooldown_log = now
+                msg = (
+                    f"[order] WAIT {intent} on {market_slug}: CLOB order API cooling down "
+                    f"after a transport failure; retrying in {remaining}s."
+                )
+                logger.info(msg)
+                await db.log_to_db("INFO", msg)
+            return None
 
         async with self._lock:
             if is_buy_order and len(self._open_orders) >= self.max_concurrent:
@@ -181,11 +198,45 @@ class OrderManager:
             return order_id
 
         except Exception as e:
+            if self._is_transport_error(e):
+                self.last_order_status = "transport_error"
+                self._order_transport_cooldown_until = (
+                    time.time() + self._order_transport_cooldown_seconds
+                )
+                self._last_transport_cooldown_log = time.time()
+                msg = (
+                    f"[order] TRANSPORT_WAIT {intent} @ ${price:.4f} on {market_slug}: "
+                    "CLOB order API unavailable; cooling down "
+                    f"{self._order_transport_cooldown_seconds}s before retry. {e}"
+                )
+                logger.warning(msg)
+                await db.log_to_db("WARNING", msg)
+                return None
+
             self.last_order_status = "error"
             msg = f"[order] FAILED {intent} @ ${price:.4f} on {market_slug}: {e}"
             logger.error(msg)
             await db.log_to_db("ERROR", msg)
             return None
+
+    @staticmethod
+    def _is_transport_error(error: Exception) -> bool:
+        text = f"{type(error).__name__}: {error}".lower()
+        return any(
+            marker in text
+            for marker in (
+                "request exception",
+                "status_code=none",
+                "connecttimeout",
+                "connectionerror",
+                "readtimeout",
+                "proxyerror",
+                "network is unreachable",
+                "temporary failure",
+                "timed out",
+                "timeout",
+            )
+        )
 
     async def cancel_order(self, order_id: str) -> bool:
         async with self._lock:
