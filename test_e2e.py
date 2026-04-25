@@ -475,6 +475,47 @@ async def test_order_manager():
               om_transport.last_order_status == "transport_cooldown",
               f"status={om_transport.last_order_status!r}")
 
+        # Region/geoblock responses are not transient network noise. Pause
+        # order attempts briefly so the bot does not keep firing rejected exits.
+        region_client = MagicMock()
+        region_client.place_order = AsyncMock(
+            side_effect=Exception(
+                "PolyApiException[status_code=403, error_message={'error': "
+                "'Trading restricted in your region, please refer to available regions - "
+                "https://docs.polymarket.com/developers/CLOB/geoblock'}]"
+            )
+        )
+        om_region = OrderManager(region_client, max_concurrent=5)
+        oid_region = await om_region.place_order(
+            market_slug="region-market",
+            question="Region market?",
+            intent="ORDER_INTENT_BUY_LONG",
+            price=0.01,
+            quantity=50.0,
+            strategy="position_monitor",
+            execution_side="SELL",
+            tif="TIME_IN_FORCE_FILL_AND_KILL",
+        )
+        check("region block returns None", oid_region is None)
+        check("region block status is explicit",
+              om_region.last_order_status == "region_blocked",
+              f"status={om_region.last_order_status!r}")
+
+        oid_region_wait = await om_region.place_order(
+            market_slug="region-market",
+            question="Region market?",
+            intent="ORDER_INTENT_BUY_LONG",
+            price=0.01,
+            quantity=50.0,
+            strategy="position_monitor",
+            execution_side="SELL",
+            tif="TIME_IN_FORCE_FILL_AND_KILL",
+        )
+        check("region block cooldown returns None", oid_region_wait is None)
+        check("region block cooldown does not call CLOB again",
+              region_client.place_order.await_count == 1,
+              f"calls={region_client.place_order.await_count}")
+
     finally:
         try:
             os.unlink(db_module.DB_PATH)
@@ -638,6 +679,38 @@ async def test_clob_direct_fallback():
         await client.close()
 
 asyncio.run(test_clob_direct_fallback())
+
+
+async def test_clob_write_proxy_only_mode():
+    from src.client import PolymarketClient
+
+    client = PolymarketClient("", "", "", "", dry_run=True)
+    calls = []
+
+    def blocked_write_call():
+        calls.append("call")
+        raise Exception("PolyApiException[status_code=None, error_message=Request exception!]")
+
+    try:
+        try:
+            await asyncio.to_thread(
+                client._call_clob_sync,
+                blocked_write_call,
+                allowed_modes=["proxy"],
+                remember_success=False,
+            )
+        except Exception:
+            pass
+        check("CLOB write proxy-only path does not direct fallback",
+              len(calls) == 1,
+              f"calls={len(calls)}")
+        check("CLOB write proxy-only path does not remember direct success",
+              client._last_successful_clob_mode == "",
+              f"last_success={client._last_successful_clob_mode!r}")
+    finally:
+        await client.close()
+
+asyncio.run(test_clob_write_proxy_only_mode())
 
 
 # ══════════════════════════════════════════════════════════════════════════════

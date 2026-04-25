@@ -1958,6 +1958,14 @@ async def api_close_live_position(payload: dict, _=Depends(verify_password)):
         )
         raise HTTPException(status_code=409, detail=detail)
 
+    if getattr(_order_manager, "last_order_status", "") == "region_blocked":
+        detail = (
+            "Polymarket rejected the trading request as region restricted. "
+            "Order placement is paused briefly so it does not loop; check that the "
+            "proxy trading route is active and accepted before trying again."
+        )
+        raise HTTPException(status_code=503, detail=detail)
+
     raise HTTPException(status_code=400, detail="Manual close order failed")
 
 

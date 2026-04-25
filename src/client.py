@@ -193,16 +193,24 @@ class PolymarketClient:
             "open_orders_cached": self._last_open_orders is not None,
         }
 
-    def _call_clob_sync(self, func, *args, **kwargs):
+    def _call_clob_sync(
+        self,
+        func,
+        *args,
+        allowed_modes: list[str] | None = None,
+        remember_success: bool = True,
+        **kwargs,
+    ):
         failures: list[str] = []
         transport_seen = False
         with self._clob_call_lock:
-            modes = self._clob_modes()
+            modes = allowed_modes or self._clob_modes()
             for index, mode in enumerate(modes):
                 try:
                     _install_clob_http_client(mode)
                     result = func(*args, **kwargs)
-                    self._last_successful_clob_mode = mode
+                    if remember_success:
+                        self._last_successful_clob_mode = mode
                     self._clob_transport_cooldown_until = 0.0
                     self._last_clob_transport_error = ""
                     return result
@@ -1115,6 +1123,8 @@ class PolymarketClient:
                 self._client.post_order,
                 signed_order,
                 orderType=order_type,
+                allowed_modes=["proxy"],
+                remember_success=False,
             )
         except Exception as e:
             error_text = str(e)
@@ -1156,6 +1166,8 @@ class PolymarketClient:
                 self._call_clob_sync,
                 self._client.cancel,
                 order_id,
+                allowed_modes=["proxy"],
+                remember_success=False,
             )
             logger.info(f"Order cancelled: {order_id}")
             return True
@@ -1171,6 +1183,8 @@ class PolymarketClient:
             await asyncio.to_thread(
                 self._call_clob_sync,
                 self._client.cancel_all,
+                allowed_modes=["proxy"],
+                remember_success=False,
             )
             logger.info("All orders cancelled")
             return True

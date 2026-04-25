@@ -34,6 +34,9 @@ class OrderManager:
         self._order_transport_cooldown_until = 0.0
         self._order_transport_cooldown_seconds = 300
         self._last_transport_cooldown_log = 0.0
+        self._order_blocked_until = 0.0
+        self._order_blocked_reason = ""
+        self._order_region_block_seconds = 900
 
     def attach_capital_manager(self, capital_manager):
         self.capital_manager = capital_manager
@@ -55,6 +58,19 @@ class OrderManager:
                 msg = (
                     f"[order] WAIT {intent} on {market_slug}: CLOB order API cooling down "
                     f"after a transport failure; retrying in {remaining}s."
+                )
+                logger.info(msg)
+                await db.log_to_db("INFO", msg)
+            return None
+
+        if self._order_blocked_until > now:
+            self.last_order_status = "region_blocked"
+            remaining = int(self._order_blocked_until - now)
+            if now - self._last_transport_cooldown_log >= 60:
+                self._last_transport_cooldown_log = now
+                msg = (
+                    f"[order] WAIT {intent} on {market_slug}: CLOB trading blocked "
+                    f"({self._order_blocked_reason}); retrying in {remaining}s."
                 )
                 logger.info(msg)
                 await db.log_to_db("INFO", msg)
@@ -198,6 +214,19 @@ class OrderManager:
             return order_id
 
         except Exception as e:
+            if self._is_region_block_error(e):
+                self.last_order_status = "region_blocked"
+                self._order_blocked_until = time.time() + self._order_region_block_seconds
+                self._order_blocked_reason = "region restricted; proxy trading path not accepted"
+                msg = (
+                    f"[order] REGION_BLOCKED {intent} @ ${price:.4f} on {market_slug}: "
+                    "Polymarket rejected the trading request as region restricted. "
+                    f"Pausing order attempts for {self._order_region_block_seconds}s so this does not loop. {e}"
+                )
+                logger.warning(msg)
+                await db.log_to_db("WARNING", msg)
+                return None
+
             if self._is_transport_error(e):
                 self.last_order_status = "transport_error"
                 self._order_transport_cooldown_until = (
@@ -218,6 +247,15 @@ class OrderManager:
             logger.error(msg)
             await db.log_to_db("ERROR", msg)
             return None
+
+    @staticmethod
+    def _is_region_block_error(error: Exception) -> bool:
+        text = f"{type(error).__name__}: {error}".lower()
+        return (
+            "trading restricted in your region" in text
+            or "geoblock" in text
+            or "available regions" in text
+        )
 
     @staticmethod
     def _is_transport_error(error: Exception) -> bool:

@@ -588,6 +588,9 @@ class AIObserver:
                 "market data unavailable; skipping new-entry",
                 "fresh entries paused",
                 "new-entry strategies paused",
+                "clob trading blocked",
+                "region restricted",
+                "region-blocked",
             )
         )
 

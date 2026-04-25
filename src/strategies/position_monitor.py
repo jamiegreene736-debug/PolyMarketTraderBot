@@ -430,6 +430,12 @@ class PositionMonitorStrategy(BaseStrategy):
                     f"CLOB order API unavailable for {slug}; exit remains queued and "
                     "will retry after transport cooldown"
                 )
+            elif getattr(self.order_manager, "last_order_status", "") == "region_blocked":
+                self.log(
+                    f"CLOB trading path region-blocked for {slug}; exit remains queued "
+                    "and will retry after the proxy/trading route cooldown",
+                    level="warning",
+                )
             else:
                 self.log(f"Exit order failed for {slug} — position stays open", level="warning")
 
