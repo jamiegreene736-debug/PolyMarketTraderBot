@@ -357,6 +357,7 @@ async def run_bot_loop():
                         order_manager=order_manager,
                         position_monitor=position_monitor,
                     )
+                    await _reconcile_disappeared_live_trades()
 
                 # ── Circuit breaker check ─────────────────────────────────
                 try:
@@ -1010,6 +1011,100 @@ async def _reconcile_live_capital_allocations(
     capital.reconcile(allocations)
 
 
+async def _reconcile_disappeared_live_trades() -> int:
+    """
+    Mark locally tracked entry rows closed when the exchange position is gone.
+
+    Polymarket's closed-positions endpoint can lag after a manual close. Without
+    this reconciliation, the dashboard can show neither an open position nor a
+    closed trade for a few refreshes, which looks like the close was lost.
+    """
+    if _client_ref is None:
+        return 0
+
+    user_address = (_client_ref.funder_address or _client_ref.signer_address or "").strip()
+    if not user_address:
+        return 0
+
+    try:
+        live_positions = await _client_ref.get_positions(user=user_address)
+    except Exception as e:
+        logger.warning(f"Closed-trade reconciliation skipped: could not fetch live positions: {e}")
+        return 0
+
+    try:
+        open_orders = await _client_ref.get_open_orders()
+    except Exception:
+        open_orders = []
+
+    live_keys: set[tuple[str, str]] = set()
+    for pos in live_positions or []:
+        outcome = str(pos.get("outcome") or "").upper()
+        side = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
+        for market_ref in (pos.get("slug"), pos.get("title")):
+            key = _normalize_market_key(market_ref)
+            if key:
+                live_keys.add((key, side))
+
+    open_order_ids = {
+        str(o.get("id") or o.get("order_id") or o.get("orderId") or "").strip()
+        for o in (open_orders or [])
+        if str(o.get("id") or o.get("order_id") or o.get("orderId") or "").strip()
+    }
+
+    closed_positions = await _get_live_closed_positions(limit=150)
+    closed_by_key: dict[tuple[str, str], dict] = {}
+    for pos in closed_positions:
+        outcome = str(pos.get("outcome") or "").upper()
+        side = "ORDER_INTENT_BUY_LONG" if outcome == "YES" else "ORDER_INTENT_BUY_SHORT"
+        for market_ref in (pos.get("slug"), pos.get("title")):
+            key = _normalize_market_key(market_ref)
+            if key and (key, side) not in closed_by_key:
+                closed_by_key[(key, side)] = pos
+
+    try:
+        open_rows = await db.get_open_trade_rows()
+    except Exception as e:
+        logger.warning(f"Closed-trade reconciliation skipped: could not fetch local trades: {e}")
+        return 0
+
+    reconciled = 0
+    for row in open_rows:
+        if str(row.get("execution_side") or "").upper() == "SELL":
+            continue
+        order_id = str(row.get("order_id") or "").strip()
+        if order_id and order_id in open_order_ids:
+            continue
+
+        side = str(row.get("side") or "").strip()
+        keys = [
+            _normalize_market_key(row.get("market_slug")),
+            _normalize_market_key(row.get("question")),
+        ]
+        keys = [key for key in keys if key]
+        if any((key, side) in live_keys for key in keys):
+            continue
+
+        matched_closed = next(
+            (closed_by_key.get((key, side)) for key in keys if closed_by_key.get((key, side))),
+            None,
+        )
+        pnl = _safe_float((matched_closed or {}).get("realizedPnl"))
+        if not order_id:
+            continue
+
+        await db.close_trade(order_id, pnl)
+        reconciled += 1
+        logger.info(
+            f"Reconciled disappeared live trade as closed: {row.get('market_slug')} "
+            f"{side} pnl=${pnl:.2f}"
+        )
+
+    if reconciled:
+        _account_cache["closed_positions_ts"] = 0.0
+    return reconciled
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/", response_class=HTMLResponse)
@@ -1491,6 +1586,8 @@ async def api_positions(_=Depends(verify_password)):
 @app.get("/api/closed-trades")
 async def api_closed_trades(_=Depends(verify_password)):
     """Return live account closed trades plus local cancelled trades, newest first."""
+    await _reconcile_disappeared_live_trades()
+
     async with aiosqlite.connect(db.DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         async with conn.execute("""
@@ -1517,6 +1614,7 @@ async def api_closed_trades(_=Depends(verify_password)):
                 strategy_lookup[key] = row
 
     live_closed_rows: list[dict] = []
+    live_closed_keys: set[tuple[str, str]] = set()
     live_closed_positions = await _get_live_closed_positions(limit=150)
     for pos in live_closed_positions:
         outcome = str(pos.get("outcome") or "").upper()
@@ -1533,6 +1631,11 @@ async def api_closed_trades(_=Depends(verify_password)):
         if quantity <= 0 and avg_price > 0:
             quantity = total_bought / avg_price
 
+        for market_ref in (slug, title):
+            key = _normalize_market_key(market_ref)
+            if key:
+                live_closed_keys.add((key, side))
+
         live_closed_rows.append({
             "timestamp": _iso_from_polymarket_timestamp(pos.get("timestamp")),
             "resolved_at": _iso_from_polymarket_timestamp(pos.get("timestamp")),
@@ -1548,10 +1651,24 @@ async def api_closed_trades(_=Depends(verify_password)):
         })
 
     local_cancelled = [row for row in status_rows if row.get("status") == "cancelled"]
+    local_closed_unmatched = []
+    for row in status_rows:
+        if row.get("status") != "closed":
+            continue
+        side = str(row.get("side") or "")
+        keys = [
+            _normalize_market_key(row.get("market_slug")),
+            _normalize_market_key(row.get("question")),
+        ]
+        if any((key, side) in live_closed_keys for key in keys if key):
+            continue
+        local_closed_unmatched.append(row)
+
     # Closed-trade reporting should follow exchange truth. Historical local
-    # "closed" rows may represent posted exit attempts, not actual realized
-    # fills, so we do not use them for P&L cards or win-rate stats.
-    closed = live_closed_rows
+    # rows are included only when the exchange closed-positions endpoint has
+    # not yet reported a matching row, which covers manual closes during Data
+    # API lag without double-counting once exchange truth appears.
+    closed = [*live_closed_rows, *local_closed_unmatched]
     all_trades = sorted(
         [*closed, *local_cancelled],
         key=_trade_sort_key,

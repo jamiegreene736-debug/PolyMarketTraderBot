@@ -245,6 +245,12 @@ class PositionMonitorStrategy(BaseStrategy):
             exit_price  = None
             trigger     = None
             exit_tif    = "TIME_IN_FORCE_FILL_OR_KILL"
+            breakeven_price = max(0.01, min(0.99, round(entry_price, 4)))
+            same_token_bid = (
+                current_bid
+                if intent == "ORDER_INTENT_BUY_LONG"
+                else round(1.0 - current_ask, 4)
+            )
 
             # ── Check max hold time first ─────────────────────────────────
             mhs = max_hold_seconds(strategy)
@@ -266,22 +272,24 @@ class PositionMonitorStrategy(BaseStrategy):
                     exit_tif = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
                     if intent == "ORDER_INTENT_BUY_LONG":
                         exit_intent = "ORDER_INTENT_BUY_LONG"
-                        exit_price  = max(0.01, round(current_bid, 4))
                     else:
                         exit_intent = "ORDER_INTENT_BUY_SHORT"
-                        exit_price  = max(0.01, round(1.0 - current_ask, 4))
+                    exit_price = breakeven_price
                 else:
                     trigger  = f"MAX_HOLD_HARD({age_hours:.1f}h,try{attempts})"
-                    # Fill-and-kill takes whatever liquidity is available and
-                    # cancels the remainder. That avoids another immortal exit
-                    # order while still reducing risk if the book is thin.
-                    exit_tif = "TIME_IN_FORCE_FILL_AND_KILL"
+                    # Only take liquidity when it is executable at breakeven
+                    # or better. Otherwise keep a passive breakeven ask resting
+                    # instead of spamming guaranteed-fail 1c FAK exits.
+                    exit_tif = (
+                        "TIME_IN_FORCE_FILL_AND_KILL"
+                        if same_token_bid >= breakeven_price
+                        else "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+                    )
                     if intent == "ORDER_INTENT_BUY_LONG":
                         exit_intent = "ORDER_INTENT_BUY_LONG"
-                        exit_price  = max(0.01, round(current_bid - 0.02, 4))
                     else:
                         exit_intent = "ORDER_INTENT_BUY_SHORT"
-                        exit_price  = max(0.01, round((1.0 - current_ask) - 0.02, 4))
+                    exit_price = breakeven_price
 
                 self._exit_attempts[attempt_key] = (first_attempt_ts, attempts)
 
@@ -321,6 +329,11 @@ class PositionMonitorStrategy(BaseStrategy):
             if not trigger:
                 continue
 
+            if same_token_bid < breakeven_price:
+                exit_tif = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+                exit_price = breakeven_price
+                trigger = f"{trigger}_BREAKEVEN_WAIT"
+
             pnl_est = (
                 (current_bid - entry_price) * quantity
                 if intent == "ORDER_INTENT_BUY_LONG"
@@ -340,11 +353,15 @@ class PositionMonitorStrategy(BaseStrategy):
                 pending_placed_at = float(pending_exit.get("placed_at") or now)
                 pending_age = max(0.0, now - pending_placed_at)
                 pending_id = str(pending_exit.get("order_id") or "")[:12]
-                if pending_age >= pending_exit_stale_seconds:
+                should_refresh_breakeven = (
+                    pending_age >= pending_exit_stale_seconds
+                    and pending_price + 0.0001 < breakeven_price
+                )
+                if should_refresh_breakeven:
                     stale_id = str(pending_exit.get("order_id") or "")
                     self.log(
                         f"Pending exit stale for {slug} ({pending_age/60:.1f}m old) — "
-                        f"canceling {pending_id} and retrying as fill-and-kill"
+                        f"canceling {pending_id} and reposting at breakeven ${breakeven_price:.4f}"
                     )
                     cancelled = await self.order_manager.cancel_order(stale_id)
                     if not cancelled:
@@ -354,7 +371,8 @@ class PositionMonitorStrategy(BaseStrategy):
                             level="warning",
                         )
                         continue
-                    exit_tif = "TIME_IN_FORCE_FILL_AND_KILL"
+                    exit_tif = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+                    exit_price = breakeven_price
                     trigger = f"{trigger}_STALE_RETRY"
                 else:
                     self.log(
